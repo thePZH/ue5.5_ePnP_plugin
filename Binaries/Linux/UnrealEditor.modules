@@ -1,0 +1,8 @@
+{
+	"BuildId": "2a8d79ca-3c7e-4f5f-9f34-221ca9127df4",
+	"Modules": 
+	{
+		"PnPTool": "libUnrealEditor-PnPTool.so",
+		"PnPToolEditor": "libUnrealEditor-PnPToolEditor.so"
+	}
+}

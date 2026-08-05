@@ -5,10 +5,11 @@
 #include "CoreMinimal.h"
 #include "Widgets/SCompoundWidget.h"
 #include "Styling/SlateBrush.h"
+#include "Engine/EngineTypes.h"
 
 class UTextureRenderTarget2D;
 class ASceneCapture2D;
-class APnPSolverActor;
+class UPnPSolverSubsystem;
 
 class SPnPToolWidget : public SCompoundWidget
 {
@@ -16,8 +17,11 @@ class SPnPToolWidget : public SCompoundWidget
 	SLATE_END_ARGS()
 
 	void Construct(const FArguments& InArgs);
+	virtual ~SPnPToolWidget();
 	virtual void Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime) override;
-
+	FOptionalSize GetSceneAspectRatio() const;
+	FOptionalSize GetRTAspectRatio() const;
+	void DrawManualMarkers();
 private:
 	void EnsureSceneCapture();
 	void UpdateSceneCaptureFromActiveViewport();
@@ -45,23 +49,55 @@ private:
 	FString GetRTPickerPath() const;
 	void    OnRTChanged(const FAssetData& InAssetData);
 
+	FString GetSourceCapturePath() const;
+	void    OnSourceCaptureChanged(const FAssetData& InAssetData);
+	FReply  OnGetIntrinsicsClicked();
+
 	const FSlateBrush* GetSceneBrush() const { return &SceneBrush; }
-	// RTBrush 无效时返回 SceneBrush 占位
-	const FSlateBrush* GetRTBrush() const { return RTBrush.IsValid() ? RTBrush.Get() : &SceneBrush; }
+	const FSlateBrush* GetRTBrush() const { return &RTBrush; }
+
+	// 鼠标交互
+	FReply OnSceneMouseDown(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent);
+	FReply OnRTMouseDown(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent);
+	void   UpdateRTMarkerOverlay();
+	FReply OnClearMarkersClicked();
 
 	FReply OnSolveClicked();
-	APnPSolverActor* FindSolverActor() const;
-	void ApplyIntrinsicsToSolver(APnPSolverActor* Solver) const;
+	UPnPSolverSubsystem* GetSolverSubsystem() const;
+	void ApplyIntrinsicsToSolver(UPnPSolverSubsystem* Solver) const;
+
+	// 日志面板
+	void LogMessage(const FString& Msg);
+	void UpdateMessages();
 
 private:
 	// 左侧场景预览
 	TWeakObjectPtr<UTextureRenderTarget2D> ScenePreviewRT;
 	TWeakObjectPtr<ASceneCapture2D> SceneCapture;
 	FSlateBrush SceneBrush;
+	TSharedPtr<SImage> SceneImageWidget;
+	TSharedPtr<SBox> SceneContainerBox;
 
 	// 右侧 RT 预览
 	TWeakObjectPtr<UTextureRenderTarget2D> SelectedRT;
-	TSharedPtr<FSlateBrush> RTBrush;
+	FSlateBrush RTBrush;
+	TSharedPtr<SImage> RTImageWidget;
+	TSharedPtr<SBox> RTContainerBox;
+
+	// 用户指定的源 SceneCapture2D（用于获取内参）
+	TWeakObjectPtr<ASceneCapture2D> SourceCapture;
+
+	// 2D 标记点 overlay
+	FSlateBrush RTMarkerBrush;
+	TSharedPtr<SImage> RTOverlayImage;
+	TArray<FVector2D> ManualImagePoints;
+	TArray<FVector> ManualObjectPoints;
+	TOptional<FVector> PendingObjectPoint;  // 待配对的 3D 点（红色显示）
+
+	// 日志面板
+	TArray<FString> Messages;
+	TSharedPtr<STextBlock> MessagesTextWidget;
+	TSharedPtr<SScrollBox> MessagesScrollBox;
 
 	// 内参
 	double Fx = 1720.54;
@@ -78,3 +114,4 @@ private:
 	double RotationError = -1.0;
 	bool bLastSolveSuccess = false;
 };
+

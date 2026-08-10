@@ -17,14 +17,16 @@ class SPnPToolWidget : public SCompoundWidget
 	SLATE_END_ARGS()
 
 	void Construct(const FArguments& InArgs);
-	virtual ~SPnPToolWidget();
+	virtual ~SPnPToolWidget() override;
 	virtual void Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime) override;
 	FOptionalSize GetSceneAspectRatio() const;
 	FOptionalSize GetRTAspectRatio() const;
 	void DrawManualMarkers();
 private:
 	void EnsureSceneCapture();
-	void UpdateSceneCaptureFromActiveViewport();
+	void EnsureRightSceneCapture();
+	void UpdateSceneCaptureFromActiveViewport() const;
+	void ResizeDisplayRT(int32 NewW, int32 NewH);
 
 	TSharedRef<SWidget> BuildInputPanel();
 	TSharedRef<SWidget> BuildRTPreviewPanel();
@@ -79,6 +81,13 @@ private:
 	TSharedPtr<SBox> SceneContainerBox;
 
 	// 右侧 RT 预览
+	// 显示用的中间 RT（使用 InitAutoFormat 创建，保证 Slate 兼容）
+	TWeakObjectPtr<UTextureRenderTarget2D> DisplayRT;
+
+	// 右侧用于捕获并显示的 SceneCapture（由插件创建，位置跟随用户选定的 SourceCapture）
+	TWeakObjectPtr<ASceneCapture2D> RightSceneCapture;
+
+	// 用户选择的原始 RT（尚可保留用于其他用途）
 	TWeakObjectPtr<UTextureRenderTarget2D> SelectedRT;
 	FSlateBrush RTBrush;
 	TSharedPtr<SImage> RTImageWidget;

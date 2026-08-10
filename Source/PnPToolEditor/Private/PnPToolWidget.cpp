@@ -51,6 +51,13 @@ SPnPToolWidget::~SPnPToolWidget()
 			World->DestroyActor(SceneCapture.Get());
 		}
 	}
+	if (RightSceneCapture.IsValid())
+	{
+		if (UWorld* World = RightSceneCapture->GetWorld())
+		{
+			World->DestroyActor(RightSceneCapture.Get());
+		}
+	}
 }
 
 void SPnPToolWidget::Construct(const FArguments& InArgs)
@@ -64,7 +71,13 @@ void SPnPToolWidget::Construct(const FArguments& InArgs)
 	SceneBrush.ImageSize = FVector2D(ScenePreviewRT->SizeX, ScenePreviewRT->SizeY);
 	SceneBrush.DrawAs = ESlateBrushDrawType::Image;
 
-	// 2. 右侧 RT 预览画刷（初始为空，OnRTChanged 中设置）
+	// 2. 创建右侧显示用的 RenderTarget（与左侧相同的初始化流程，保证 Slate 显示兼容）
+	DisplayRT = NewObject<UTextureRenderTarget2D>(GetTransientPackage(), TEXT("PnPDisplayRT"), RF_Transient);
+	DisplayRT->InitAutoFormat(960, 540);
+	DisplayRT->UpdateResource();
+
+	RTBrush.SetResourceObject(DisplayRT.Get());
+	RTBrush.ImageSize = FVector2D(DisplayRT->SizeX, DisplayRT->SizeY);
 	RTBrush.DrawAs = ESlateBrushDrawType::Image;
 
 	// 3. 2D 标记点 overlay 画刷（初始不绘制）
@@ -408,125 +421,19 @@ FString SPnPToolWidget::GetRTPickerPath() const
 
 void SPnPToolWidget::OnRTChanged(const FAssetData& InAssetData)
 {
-	LogMessage(FString::Printf(TEXT("[RT调试] OnRTChanged 调用, AssetData: %s, Asset=%s"),
-		*InAssetData.GetExportTextName(), *InAssetData.GetObjectPathString()));
-
-	UObject* AssetObj = InAssetData.GetAsset();
-	LogMessage(FString::Printf(TEXT("[RT调试] Asset 对象指针=%p, 类=%s"), AssetObj, AssetObj ? *AssetObj->GetClass()->GetName() : TEXT("null")));
-
 	SelectedRT = Cast<UTextureRenderTarget2D>(InAssetData.GetAsset());
 
 	if (SelectedRT.IsValid())
 	{
-		LogMessage(FString::Printf(TEXT("[RT调试] Cast 成功, PathName=%s"), *SelectedRT->GetPathName()));
+		LogMessage(FString::Printf(TEXT("[RT] 已选择目标 RT: %s, 尺寸=%dx%d"),
+			*SelectedRT->GetPathName(), SelectedRT->SizeX, SelectedRT->SizeY));
 
-		const int32 W = SelectedRT->SizeX;
-		const int32 H = SelectedRT->SizeY;
-		const EPixelFormat Format = SelectedRT->GetFormat();
-		const FLinearColor ClearColor = SelectedRT->ClearColor;
-		const bool bInSceneCapture = (SelectedRT->GetOuter() != nullptr);
-
-		LogMessage(FString::Printf(TEXT("[RT调试] 尺寸=%dx%d, Format=%d, ClearColor=(%.2f,%.2f,%.2f,%.2f)"),
-			W, H, (int32)Format, ClearColor.R, ClearColor.G, ClearColor.B, ClearColor.A));
-
-		// 确保渲染资源已创建
-		SelectedRT->UpdateResource();
-		SelectedRT->UpdateResourceImmediate(true);
-
-		FTextureResource* Res = SelectedRT->GetResource();
-		FTextureRHIRef rhiRef = SelectedRT->GetResource() ? SelectedRT->GetResource()->TextureRHI : nullptr;
-
-		LogMessage(FString::Printf(TEXT("[RT调试] UpdateResource 后: Resource=%p, RHI=%p, ResourceValid=%s"),
-			Res, rhiRef.GetReference(), Res ? TEXT("true") : TEXT("false")));
-
-		if (Res)
-		{
-			const FTexture2DRHIRef Tex2D = rhiRef ? rhiRef->GetTexture2D() : nullptr;
-			LogMessage(FString::Printf(TEXT("[RT调试] Resource 大小=%dx%d, Tex2D=%p"),
-				Res->GetSizeX(), Res->GetSizeY(), Tex2D.GetReference()));
-		}
-
-		// 检查是否被 SceneCapture2D 引用，并强制 Capture 一次以确保 RHI 资源有内容
-		int32 RefCount = 0;
-		USceneCaptureComponent2D* CaptureComp = nullptr;
-		for (TObjectIterator<USceneCaptureComponent2D> It; It; ++It)
-		{
-			if (It->TextureTarget == SelectedRT.Get())
-			{
-				RefCount++;
-				CaptureComp = *It;
-				if (AActor* Owner = It->GetOwner())
-				{
-					LogMessage(FString::Printf(TEXT("[RT调试] 被 SceneCapture2D 引用: %s (CaptureEveryFrame=%s, CaptureOnceOnMovement=%s)"),
-						*Owner->GetPathName(),
-						It->bCaptureEveryFrame ? TEXT("true") : TEXT("false"),
-						It->bCaptureOnMovement ? TEXT("true") : TEXT("false")));
-				}
-			}
-		}
-		if (RefCount == 0)
-		{
-			LogMessage(TEXT("[RT警告] 此 RT 未被任何 SceneCaptureComponent2D 引用！将尝试用我们的 SceneCapture 渲染一次"));
-			// 用工具自己的 SceneCapture 渲染一次到这个 RT
-			if (SceneCapture.IsValid())
-			{
-				USceneCaptureComponent2D* Comp = SceneCapture->GetCaptureComponent2D();
-				if (Comp)
-				{
-					UTextureRenderTarget2D* OldTarget = Comp->TextureTarget;
-					Comp->TextureTarget = SelectedRT.Get();
-					Comp->CaptureScene();
-					Comp->TextureTarget = OldTarget;
-					LogMessage(TEXT("[RT调试] 已用工具 SceneCapture 强制渲染一次"));
-				}
-			}
-		}
-		else if (CaptureComp)
-		{
-			// 强制 Capture 一次确保 RHI 资源有内容
-			CaptureComp->CaptureScene();
-			LogMessage(TEXT("[RT调试] 已强制 CaptureScene 一次"));
-		}
-
-		RTBrush.SetResourceObject(nullptr);
-		RTBrush.SetResourceObject(SelectedRT.Get());
-		RTBrush.ImageSize = FVector2D(W, H);
-		RTBrush.DrawAs = ESlateBrushDrawType::Image;
-		RTBrush.TintColor = FSlateColor(FLinearColor::White);
-		RTBrush.Margin = FMargin(0, 0, 0, 0);
-#if WITH_EDITOR
-		RTBrush.InvalidateResourceHandle();
-#endif
-
-		LogMessage(FString::Printf(TEXT("[RT调试] RTBrush 已设置: ResourceObject=%p, ImageSize=(%.0f,%.0f), DrawAs=%d"),
-			RTBrush.GetResourceObject(), RTBrush.ImageSize.X, RTBrush.ImageSize.Y, (int32)RTBrush.DrawAs));
-
-		if (RTImageWidget.IsValid())
-		{
-			RTImageWidget->Invalidate(EInvalidateWidget::Layout | EInvalidateWidget::Paint);
-			LogMessage(TEXT("[RT调试] RTImageWidget Invalidate 完成"));
-		}
-		else
-		{
-			LogMessage(TEXT("[RT警告] RTImageWidget 无效！"));
-		}
-
-		if (!Res)
-		{
-			LogMessage(TEXT("[RT警告] RT 渲染资源为 NULL，可能从未被渲染过"));
-		}
+		// 立即同步 DisplayRT 尺寸到目标 RT（Tick 中也会持续跟随）
+		ResizeDisplayRT(SelectedRT->SizeX, SelectedRT->SizeY);
 	}
 	else
 	{
-		LogMessage(TEXT("[RT调试] Cast<UTextureRenderTarget2D> 失败，可能选错资产类型"));
-
-		RTBrush.SetResourceObject(nullptr);
-		RTBrush.ImageSize = FVector2D::ZeroVector;
-
-		if (RTImageWidget.IsValid())
-		{
-			RTImageWidget->Invalidate(EInvalidateWidget::Paint);
-		}
+		LogMessage(TEXT("[RT] Cast<UTextureRenderTarget2D> 失败，可能选错资产类型"));
 	}
 
 	UpdateRTMarkerOverlay();
@@ -612,7 +519,66 @@ void SPnPToolWidget::EnsureSceneCapture()
 	}
 }
 
-void SPnPToolWidget::UpdateSceneCaptureFromActiveViewport()
+void SPnPToolWidget::EnsureRightSceneCapture()
+{
+	if (RightSceneCapture.IsValid()) return;
+
+	UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+	if (!World) return;
+
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+	RightSceneCapture = World->SpawnActor<ASceneCapture2D>(ASceneCapture2D::StaticClass(), FTransform::Identity, Params);
+
+	if (ASceneCapture2D* Cap = RightSceneCapture.Get())
+	{
+		Cap->SetIsTemporarilyHiddenInEditor(true);
+
+		if (USceneCaptureComponent2D* Comp = Cap->GetCaptureComponent2D())
+		{
+			Comp->TextureTarget = DisplayRT.Get();
+			Comp->bCaptureEveryFrame = true;
+			Comp->bCaptureOnMovement = false;
+			Comp->CaptureSource = ESceneCaptureSource::SCS_FinalColorLDR;
+		}
+	}
+}
+
+void SPnPToolWidget::ResizeDisplayRT(int32 NewW, int32 NewH)
+{
+	if (NewW <= 0 || NewH <= 0) return;
+	if (!DisplayRT.IsValid()) return;
+
+	// 尺寸相同则无需重建
+	if (DisplayRT->SizeX == NewW && DisplayRT->SizeY == NewH)
+	{
+		return;
+	}
+
+	// 重新初始化 RT 尺寸（InitAutoFormat 会自动选择合适的像素格式）
+	DisplayRT->InitAutoFormat(NewW, NewH);
+	DisplayRT->UpdateResource();
+
+	// 更新 brush 指向（始终指向 DisplayRT，由 RightSceneCapture 自行捕获内容）
+	RTBrush.SetResourceObject(nullptr);
+	RTBrush.SetResourceObject(DisplayRT.Get());
+	RTBrush.ImageSize = FVector2D(NewW, NewH);
+	RTBrush.DrawAs = ESlateBrushDrawType::Image;
+	RTBrush.TintColor = FSlateColor(FLinearColor::White);
+#if WITH_EDITOR
+	RTBrush.InvalidateResourceHandle();
+#endif
+
+	if (RTImageWidget.IsValid())
+	{
+		RTImageWidget->Invalidate(EInvalidateWidget::Layout | EInvalidateWidget::Paint);
+	}
+
+	LogMessage(FString::Printf(TEXT("[RT] DisplayRT 已调整尺寸为 %dx%d"), NewW, NewH));
+}
+
+void SPnPToolWidget::UpdateSceneCaptureFromActiveViewport() const
 {
 	if (!SceneCapture.IsValid()) return;
 
@@ -631,7 +597,46 @@ void SPnPToolWidget::UpdateSceneCaptureFromActiveViewport()
 void SPnPToolWidget::Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime)
 {
 	EnsureSceneCapture();
+	EnsureRightSceneCapture();
 	UpdateSceneCaptureFromActiveViewport();
+
+	// 将右侧插件创建的 SceneCapture 位置/朝向与用户选择的 SourceCapture 同步（若无，则跟随编辑器视口）
+	if (RightSceneCapture.IsValid())
+	{
+		if (SourceCapture.IsValid())
+		{
+			RightSceneCapture->SetActorLocation(SourceCapture->GetActorLocation());
+			RightSceneCapture->SetActorRotation(SourceCapture->GetActorRotation());
+
+			// 同步 FOV，使右侧视口捕获画面与 SourceCapture 一致
+			if (USceneCaptureComponent2D* RightComp = RightSceneCapture->GetCaptureComponent2D())
+			{
+				if (USceneCaptureComponent2D* SrcComp = SourceCapture->GetCaptureComponent2D())
+				{
+					RightComp->FOVAngle = SrcComp->FOVAngle;
+				}
+			}
+		}
+		else
+		{
+			FViewport* ActiveVP = GEditor ? GEditor->GetActiveViewport() : nullptr;
+			FEditorViewportClient* VPC = (ActiveVP && ActiveVP->GetClient()) ? static_cast<FEditorViewportClient*>(ActiveVP->GetClient()) : nullptr;
+			if (VPC && VPC->IsPerspective())
+			{
+				RightSceneCapture->SetActorLocation(VPC->GetViewLocation());
+				RightSceneCapture->SetActorRotation(VPC->GetViewRotation());
+			}
+		}
+	}
+
+	// 实时跟随目标 RT（SelectedRT）的尺寸，保持 DisplayRT 与之一致
+	if (SelectedRT.IsValid() && DisplayRT.IsValid())
+	{
+		if (DisplayRT->SizeX != SelectedRT->SizeX || DisplayRT->SizeY != SelectedRT->SizeY)
+		{
+			ResizeDisplayRT(SelectedRT->SizeX, SelectedRT->SizeY);
+		}
+	}
 
 	// 只在点变化时重绘 debug，避免每帧 FlushPersistentDebugLines 导致闪烁
 	static int32 LastObjCount = -1;
@@ -656,9 +661,9 @@ FOptionalSize SPnPToolWidget::GetSceneAspectRatio() const
 
 FOptionalSize SPnPToolWidget::GetRTAspectRatio() const
 {
-	if (SelectedRT.IsValid() && SelectedRT->SizeY > 0)
+	if (DisplayRT.IsValid() && DisplayRT->SizeY > 0)
 	{
-		return FOptionalSize(static_cast<float>(SelectedRT->SizeX) / static_cast<float>(SelectedRT->SizeY));
+		return FOptionalSize(static_cast<float>(DisplayRT->SizeX) / static_cast<float>(DisplayRT->SizeY));
 	}
 	return FOptionalSize(16.0f / 9.0f);
 }
@@ -762,7 +767,7 @@ FReply SPnPToolWidget::OnSceneMouseDown(const FGeometry& MyGeometry, const FPoin
 FReply SPnPToolWidget::OnRTMouseDown(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent)
 {
 	if (MouseEvent.GetEffectingButton() != EKeys::LeftMouseButton) return FReply::Handled();
-	if (!SelectedRT.IsValid()) return FReply::Handled();
+	if (!DisplayRT.IsValid()) return FReply::Handled();
 
 	// 必须先在左侧场景视口选择 3D 点
 	if (!PendingObjectPoint.IsSet())
@@ -783,9 +788,9 @@ FReply SPnPToolWidget::OnRTMouseDown(const FGeometry& MyGeometry, const FPointer
 		return FReply::Handled();
 	}
 
-	// UV 转像素坐标
-	const float Px = UVPos.X * SelectedRT->SizeX;
-	const float Py = UVPos.Y * SelectedRT->SizeY;
+	// UV 转像素坐标（使用 DisplayRT，即实际显示的 RT 尺寸）
+	const float Px = UVPos.X * DisplayRT->SizeX;
+	const float Py = UVPos.Y * DisplayRT->SizeY;
 
 	// 完成配对
 	ManualObjectPoints.Add(PendingObjectPoint.GetValue());
@@ -805,7 +810,7 @@ FReply SPnPToolWidget::OnRTMouseDown(const FGeometry& MyGeometry, const FPointer
 
 void SPnPToolWidget::UpdateRTMarkerOverlay()
 {
-	if (!SelectedRT.IsValid())
+	if (!DisplayRT.IsValid())
 	{
 		RTMarkerBrush.DrawAs = ESlateBrushDrawType::NoDrawType;
 		if (RTOverlayImage.IsValid())
@@ -815,8 +820,8 @@ void SPnPToolWidget::UpdateRTMarkerOverlay()
 		return;
 	}
 
-	const int32 RTW = SelectedRT->SizeX;
-	const int32 RTH = SelectedRT->SizeY;
+	const int32 RTW = DisplayRT->SizeX;
+	const int32 RTH = DisplayRT->SizeY;
 	if (RTW <= 0 || RTH <= 0) return;
 
 	// 创建动态 Texture2D（用 CreateTransient 避免手动管理 PlatformData）
@@ -996,6 +1001,46 @@ FReply SPnPToolWidget::OnSolveClicked()
 	if (SourceCapture.IsValid())
 	{
 		Solver->m_GroundTruthPose = SourceCapture->GetActorTransform();
+	}
+
+	// === GroundTruth 投影验证 ===
+	// 用 SourceCapture 的真实位姿 + 内参，把每个 3D 点投影到 2D，与用户点击的 2D 点对比。
+	// 若两者差距大 → 配对/内参/右侧画面不一致有问题（求解器无辜）。
+	// 若两者接近  → 配对正确，问题在求解器本身或点分布。
+	if (SourceCapture.IsValid())
+	{
+		const FVector CamLoc = SourceCapture->GetActorLocation();
+		const FRotator CamRot = SourceCapture->GetActorRotation();
+		double TotalGtErr = 0.0;
+		double MaxGtErr = 0.0;
+		LogMessage(TEXT("[GT验证] 用 SourceCapture 真实位姿投影 3D 点，对比用户 2D 点:"));
+		for (int32 i = 0; i < ManualObjectPoints.Num(); ++i)
+		{
+			const FVector PWorld = ManualObjectPoints[i];
+			// 世界 → UE 相机空间（X前 Y右 Z上）
+			const FVector PCam = CamRot.UnrotateVector(PWorld - CamLoc);
+			// 点在相机后方或正好在相机平面上，跳过
+			if (PCam.X <= KINDA_SMALL_NUMBER)
+			{
+				LogMessage(FString::Printf(TEXT("[GT验证] #%d 3D(%.1f,%.1f,%.1f) 在相机后方或过近, PCam.X=%.4f"),
+					i, PWorld.X, PWorld.Y, PWorld.Z, PCam.X));
+				continue;
+			}
+			// OpenCV 投影：u = fx*Y/X + cx, v = fy*(-Z)/X + cy
+			const double U = Fx * (PCam.Y / PCam.X) + Cx;
+			const double V = Fy * (-PCam.Z / PCam.X) + Cy;
+			const FVector2D UserPt = ManualImagePoints[i];
+			const double Dx = U - UserPt.X;
+			const double Dy = V - UserPt.Y;
+			const double Err = FMath::Sqrt(Dx * Dx + Dy * Dy);
+			TotalGtErr += Err;
+			if (Err > MaxGtErr) MaxGtErr = Err;
+			LogMessage(FString::Printf(TEXT("[GT验证] #%d 3D(%.1f,%.1f,%.1f) 投影=(%.1f,%.1f) 用户=(%.1f,%.1f) 误差=%.1fpx"),
+				i, PWorld.X, PWorld.Y, PWorld.Z, U, V, UserPt.X, UserPt.Y, Err));
+		}
+		const double AvgErr = ManualObjectPoints.Num() > 0 ? TotalGtErr / ManualObjectPoints.Num() : 0.0;
+		LogMessage(FString::Printf(TEXT("[GT验证] 平均误差=%.1fpx 最大误差=%.1fpx（<5px=配对正确, >20px=配对/内参/画面不一致）"),
+			AvgErr, MaxGtErr));
 	}
 
 	Solver->SolvePnP();

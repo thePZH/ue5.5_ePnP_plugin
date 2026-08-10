@@ -142,6 +142,9 @@ void SPnPToolWidget::Construct(const FArguments& InArgs)
 			+ SSplitter::Slot().Value(0.33f)[ BuildResultsPanel() ]
 		]
 	];
+
+	// 初始化配对列表空状态显示
+	RebuildPairsList();
 }
 
 TSharedRef<SWidget> SPnPToolWidget::BuildInputPanel()
@@ -263,20 +266,26 @@ TSharedRef<SWidget> SPnPToolWidget::BuildInputPanel()
 			]
 
 			// 清除标记点按钮
-			+ SScrollBox::Slot().Padding(2).HAlign(HAlign_Left)
-			[
-				SNew(SButton)
-					.Text(LOCTEXT("ClearMarkersBtn", "清除所有标记点"))
-					.OnClicked(this, &SPnPToolWidget::OnClearMarkersClicked)
-			]
+		+ SScrollBox::Slot().Padding(2).HAlign(HAlign_Left)
+		[
+			SNew(SButton)
+				.Text(LOCTEXT("ClearMarkersBtn", "清除所有标记点"))
+				.OnClicked(this, &SPnPToolWidget::OnClearMarkersClicked)
+		]
 
-			// 求解按钮
-			+ SScrollBox::Slot().Padding(2, 8, 2, 2).HAlign(HAlign_Left)
-			[
-				SNew(SButton)
-					.Text(LOCTEXT("SolveBtn", "执行 PnP 求解"))
-					.OnClicked(this, &SPnPToolWidget::OnSolveClicked)
-			]
+		// 配对列表（可编辑）
+		+ SScrollBox::Slot().Padding(2, 4, 2, 2)
+		[
+			SAssignNew(PairsListContainer, SVerticalBox)
+		]
+
+		// 求解按钮
+		+ SScrollBox::Slot().Padding(2, 8, 2, 2).HAlign(HAlign_Left)
+		[
+			SNew(SButton)
+				.Text(LOCTEXT("SolveBtn", "执行 PnP 求解"))
+				.OnClicked(this, &SPnPToolWidget::OnSolveClicked)
+		]
 		];
 }
 
@@ -668,6 +677,194 @@ FOptionalSize SPnPToolWidget::GetRTAspectRatio() const
 	return FOptionalSize(16.0f / 9.0f);
 }
 
+FVector2D SPnPToolWidget::ProjectWorldToImage(const FVector& WorldPoint) const
+{
+	if (!SourceCapture.IsValid())
+	{
+		return FVector2D(-1.0, -1.0);
+	}
+	const FVector CamLoc = SourceCapture->GetActorLocation();
+	const FRotator CamRot = SourceCapture->GetActorRotation();
+	// 世界 → UE 相机空间（X 前 Y 右 Z 上）
+	const FVector PCam = CamRot.UnrotateVector(WorldPoint - CamLoc);
+	if (PCam.X <= KINDA_SMALL_NUMBER)
+	{
+		return FVector2D(-1.0, -1.0);
+	}
+	// OpenCV 针孔模型：u = fx * Y'/X' + cx, v = fy * (-Z'/X') + cy
+	const double U = Fx * (PCam.Y / PCam.X) + Cx;
+	const double V = Fy * (-PCam.Z / PCam.X) + Cy;
+	return FVector2D(U, V);
+}
+
+void SPnPToolWidget::RebuildPairsList()
+{
+	if (!PairsListContainer.IsValid()) return;
+	PairsListContainer->ClearChildren();
+
+	// 表头
+	PairsListContainer->AddSlot().AutoHeight()
+	[
+		SNew(SHorizontalBox)
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(2, 2, 6, 2)
+		[
+			SNew(STextBlock).Text(LOCTEXT("PairsHeader", "配对列表（3D / 2D 可编辑，黄色=活动，右侧RT点击覆盖活动2D）"))
+			.Font(FCoreStyle::GetDefaultFontStyle("Bold", 9))
+		]
+	];
+
+	if (ManualObjectPoints.Num() == 0)
+	{
+		PairsListContainer->AddSlot().AutoHeight().Padding(2)
+		[
+			SNew(STextBlock)
+			.Text(LOCTEXT("PairsEmpty", "（无配对。在左侧场景视口点击 3D 点开始）"))
+			.ColorAndOpacity(FLinearColor::Gray)
+		];
+		return;
+	}
+
+	auto MakeCoordBox = [](double InitialValue, TFunction<void(double)> OnCommit) -> TSharedRef<SWidget>
+	{
+		return SNew(SSpinBox<double>)
+			.Value(InitialValue)
+			.MinValue(-1000000.0).MaxValue(1000000.0).Delta(1.0)
+			.MinDesiredWidth(70.0f)
+			.OnValueCommitted_Lambda([OnCommit](double V, ETextCommit::Type) { OnCommit(V); });
+	};
+
+	for (int32 i = 0; i < ManualObjectPoints.Num(); ++i)
+	{
+		const bool bIsActive = (i == ActivePairIndex);
+		const int32 CapturedIdx = i; // 供 lambda 捕获，重建后该行 widget 销毁，索引仍有效
+
+		PairsListContainer->AddSlot().AutoHeight().Padding(2)
+		[
+			SNew(SBorder)
+			.BorderBackgroundColor_Lambda([this, CapturedIdx]()
+			{
+				return (CapturedIdx == ActivePairIndex)
+					? FLinearColor(1.0f, 0.85f, 0.0f, 0.45f)
+					: FLinearColor(0.18f, 0.18f, 0.18f, 0.4f);
+			})
+			.Padding(2)
+			[
+				SNew(SHorizontalBox)
+
+				// #i
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(2)
+				[
+					SNew(STextBlock).Text(FText::FromString(FString::Printf(TEXT("#%d"), i)))
+				]
+
+				// 3D X
+				+ SHorizontalBox::Slot().FillWidth(1.0f)
+				[
+					MakeCoordBox(ManualObjectPoints[i].X, [this, CapturedIdx](double V)
+					{
+						if (ManualObjectPoints.IsValidIndex(CapturedIdx))
+						{
+							ManualObjectPoints[CapturedIdx].X = V;
+							DrawManualMarkers();
+						}
+					})
+				]
+				// 3D Y
+				+ SHorizontalBox::Slot().FillWidth(1.0f)
+				[
+					MakeCoordBox(ManualObjectPoints[i].Y, [this, CapturedIdx](double V)
+					{
+						if (ManualObjectPoints.IsValidIndex(CapturedIdx))
+						{
+							ManualObjectPoints[CapturedIdx].Y = V;
+							DrawManualMarkers();
+						}
+					})
+				]
+				// 3D Z
+				+ SHorizontalBox::Slot().FillWidth(1.0f)
+				[
+					MakeCoordBox(ManualObjectPoints[i].Z, [this, CapturedIdx](double V)
+					{
+						if (ManualObjectPoints.IsValidIndex(CapturedIdx))
+						{
+							ManualObjectPoints[CapturedIdx].Z = V;
+							DrawManualMarkers();
+						}
+					})
+				]
+
+				// 分隔
+				+ SHorizontalBox::Slot().AutoWidth().Padding(4, 0)
+				[
+					SNew(STextBlock).Text(FText::FromString(TEXT("<->")))
+				]
+
+				// 2D U
+				+ SHorizontalBox::Slot().FillWidth(1.0f)
+				[
+					MakeCoordBox(ManualImagePoints[i].X, [this, CapturedIdx](double V)
+					{
+						if (ManualImagePoints.IsValidIndex(CapturedIdx))
+						{
+							ManualImagePoints[CapturedIdx].X = V;
+							UpdateRTMarkerOverlay();
+						}
+					})
+				]
+				// 2D V
+				+ SHorizontalBox::Slot().FillWidth(1.0f)
+				[
+					MakeCoordBox(ManualImagePoints[i].Y, [this, CapturedIdx](double V)
+					{
+						if (ManualImagePoints.IsValidIndex(CapturedIdx))
+						{
+							ManualImagePoints[CapturedIdx].Y = V;
+							UpdateRTMarkerOverlay();
+						}
+					})
+				]
+
+				// 设为活动
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(2, 0)
+				[
+					SNew(SButton)
+					.Text(FText::FromString(bIsActive ? TEXT("●活动") : TEXT("设活动")))
+					.OnClicked_Lambda([this, CapturedIdx]() -> FReply
+					{
+						ActivePairIndex = CapturedIdx;
+						RebuildPairsList();
+						UpdateRTMarkerOverlay();
+						DrawManualMarkers();
+						return FReply::Handled();
+					})
+				]
+
+				// 删除
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(2, 0)
+				[
+					SNew(SButton)
+					.Text(FText::FromString(TEXT("删除")))
+					.OnClicked_Lambda([this, CapturedIdx]() -> FReply
+					{
+						if (ManualObjectPoints.IsValidIndex(CapturedIdx))
+						{
+							ManualObjectPoints.RemoveAt(CapturedIdx);
+							ManualImagePoints.RemoveAt(CapturedIdx);
+							if (ActivePairIndex == CapturedIdx) ActivePairIndex = INDEX_NONE;
+							else if (ActivePairIndex > CapturedIdx) ActivePairIndex--;
+							RebuildPairsList();
+							UpdateRTMarkerOverlay();
+							DrawManualMarkers();
+						}
+						return FReply::Handled();
+					})
+				]
+			]
+		];
+	}
+}
+
 void SPnPToolWidget::DrawManualMarkers()
 {
 	// 在编辑器视口中绘制已选 3D 点
@@ -678,13 +875,15 @@ void SPnPToolWidget::DrawManualMarkers()
 	// 清除旧的持久调试绘制
 	FlushPersistentDebugLines(World);
 
-	// 已配对的点用绿色
+	// 已配对的点用绿色；当前活动配对用黄色高亮（提示右侧 RT 点击会覆盖其 2D）
 	for (int32 i = 0; i < ManualObjectPoints.Num(); ++i)
 	{
 		const FVector& Pt = ManualObjectPoints[i];
-		DrawDebugSphere(World, Pt, 10.0f, 12, FColor::Green, true, -1.0f, 0, 2.0f);
-		const FString Label = FString::Printf(TEXT("#%d"), i);
-		DrawDebugString(World, Pt + FVector(0, 0, 20.0f), Label, nullptr, FColor::Green, 0.0f, true);
+		const bool bActive = (i == ActivePairIndex);
+		const FColor PtColor = bActive ? FColor::Yellow : FColor::Green;
+		DrawDebugSphere(World, Pt, bActive ? 12.0f : 10.0f, 12, PtColor, true, -1.0f, 0, bActive ? 3.0f : 2.0f);
+		const FString Label = FString::Printf(TEXT("#%d%s"), i, bActive ? TEXT(" (活动)") : TEXT(""));
+		DrawDebugString(World, Pt + FVector(0, 0, 20.0f), Label, nullptr, PtColor, 0.0f, true);
 	}
 
 	// 待配对的点用红色
@@ -701,8 +900,8 @@ FReply SPnPToolWidget::OnSceneMouseDown(const FGeometry& MyGeometry, const FPoin
 	if (MouseEvent.GetEffectingButton() != EKeys::LeftMouseButton) return FReply::Handled();
 	if (!ScenePreviewRT.IsValid() || !SceneCapture.IsValid()) return FReply::Handled();
 
-	// 配对未完成时禁止继续点击
-	if (PendingObjectPoint.IsSet())
+	// 仅在无 SourceCapture 的回退流程中，要求先完成上一个待配对点
+	if (!SourceCapture.IsValid() && PendingObjectPoint.IsSet())
 	{
 		LogMessage(TEXT("[警告] 当前已有未配对的 3D 点（红色），请先在右侧 RT 上点击对应 2D 点完成配对"));
 		return FReply::Handled();
@@ -756,9 +955,38 @@ FReply SPnPToolWidget::OnSceneMouseDown(const FGeometry& MyGeometry, const FPoin
 
 	if (bHit)
 	{
-		PendingObjectPoint = HitResult.ImpactPoint;
-		LogMessage(FString::Printf(TEXT("[3D点] 已选择 (红色, 待配对): (%.1f, %.1f, %.1f) - 请在右侧 RT 点击对应 2D 点"),
-			HitResult.ImpactPoint.X, HitResult.ImpactPoint.Y, HitResult.ImpactPoint.Z));
+		const FVector HitPoint = HitResult.ImpactPoint;
+
+		// 主流程：有 SourceCapture → 自动投影生成配对
+		if (SourceCapture.IsValid())
+		{
+			const FVector2D ProjUV = ProjectWorldToImage(HitPoint);
+			ManualObjectPoints.Add(HitPoint);
+			ManualImagePoints.Add(ProjUV);
+			ActivePairIndex = ManualObjectPoints.Num() - 1;
+
+			if (ProjUV.X >= 0.0 && ProjUV.Y >= 0.0)
+			{
+				LogMessage(FString::Printf(TEXT("[配对 #%d] 3D(%.1f, %.1f, %.1f) <-> 2D(%.1f, %.1f) [自动投影] 可在右侧 RT 点击微调"),
+					ActivePairIndex, HitPoint.X, HitPoint.Y, HitPoint.Z, ProjUV.X, ProjUV.Y));
+			}
+			else
+			{
+				LogMessage(FString::Printf(TEXT("[配对 #%d] 3D(%.1f, %.1f, %.1f) 自动投影失败(点在相机后方)，请手动点击 RT 或在列表修改 2D 坐标"),
+					ActivePairIndex, HitPoint.X, HitPoint.Y, HitPoint.Z));
+			}
+			RebuildPairsList();
+			UpdateRTMarkerOverlay();
+			DrawManualMarkers();
+		}
+		else
+		{
+			// 回退流程：无 SourceCapture，存为待配对点，等右侧点击
+			PendingObjectPoint = HitPoint;
+			LogMessage(FString::Printf(TEXT("[3D点] 已选择 (红色, 待配对): (%.1f, %.1f, %.1f) - 请在右侧 RT 点击对应 2D 点"),
+				HitPoint.X, HitPoint.Y, HitPoint.Z));
+			DrawManualMarkers();
+		}
 	}
 
 	return FReply::Handled();
@@ -769,8 +997,8 @@ FReply SPnPToolWidget::OnRTMouseDown(const FGeometry& MyGeometry, const FPointer
 	if (MouseEvent.GetEffectingButton() != EKeys::LeftMouseButton) return FReply::Handled();
 	if (!DisplayRT.IsValid()) return FReply::Handled();
 
-	// 必须先在左侧场景视口选择 3D 点
-	if (!PendingObjectPoint.IsSet())
+	// 无活动配对且无待配对点 → 提示先选 3D
+	if (!PendingObjectPoint.IsSet() && !ManualImagePoints.IsValidIndex(ActivePairIndex))
 	{
 		LogMessage(TEXT("[警告] 请先在左侧场景视口点击选择 3D 点"));
 		return FReply::Handled();
@@ -792,18 +1020,31 @@ FReply SPnPToolWidget::OnRTMouseDown(const FGeometry& MyGeometry, const FPointer
 	const float Px = UVPos.X * DisplayRT->SizeX;
 	const float Py = UVPos.Y * DisplayRT->SizeY;
 
-	// 完成配对
-	ManualObjectPoints.Add(PendingObjectPoint.GetValue());
-	ManualImagePoints.Add(FVector2D(Px, Py));
-	const int32 Idx = ManualObjectPoints.Num() - 1;
-	PendingObjectPoint.Reset();
+	// 优先处理回退流程：有待配对的 3D 点 → 完成新配对
+	if (PendingObjectPoint.IsSet())
+	{
+		ManualObjectPoints.Add(PendingObjectPoint.GetValue());
+		ManualImagePoints.Add(FVector2D(Px, Py));
+		ActivePairIndex = ManualObjectPoints.Num() - 1;
+		PendingObjectPoint.Reset();
 
-	LogMessage(FString::Printf(TEXT("[配对 #%d] 3D(%.1f, %.1f, %.1f) <-> 2D(%.1f, %.1f)"),
-		Idx,
-		ManualObjectPoints[Idx].X, ManualObjectPoints[Idx].Y, ManualObjectPoints[Idx].Z,
-		Px, Py));
+		LogMessage(FString::Printf(TEXT("[配对 #%d] 3D(%.1f, %.1f, %.1f) <-> 2D(%.1f, %.1f) [手动点击]"),
+			ActivePairIndex,
+			ManualObjectPoints[ActivePairIndex].X, ManualObjectPoints[ActivePairIndex].Y, ManualObjectPoints[ActivePairIndex].Z,
+			Px, Py));
+	}
+	else if (ManualImagePoints.IsValidIndex(ActivePairIndex))
+	{
+		// 主流程：覆盖当前活动配对的 2D 点（多次点击，最后一次生效）
+		const FVector& Obj = ManualObjectPoints[ActivePairIndex];
+		ManualImagePoints[ActivePairIndex] = FVector2D(Px, Py);
+		LogMessage(FString::Printf(TEXT("[配对 #%d] 2D 已更新为 (%.1f, %.1f) [覆盖] 3D(%.1f, %.1f, %.1f)"),
+			ActivePairIndex, Px, Py, Obj.X, Obj.Y, Obj.Z));
+	}
 
+	RebuildPairsList();
 	UpdateRTMarkerOverlay();
+	DrawManualMarkers();
 
 	return FReply::Handled();
 }
@@ -852,12 +1093,12 @@ void SPnPToolWidget::UpdateRTMarkerOverlay()
 		Pixels[Idx + 3] = A;
 	};
 
-	// 画红色十字 + 中心圆
-	auto DrawPoint = [&](int32 X, int32 Y)
+	// 画十字 + 中心圆；颜色由调用方传入（活动=黄色, 其余=绿色）
+	auto DrawPoint = [&](int32 X, int32 Y, uint8 R, uint8 G, uint8 B)
 	{
 		const int32 Size = 8;
-		for (int32 dx = -Size; dx <= Size; ++dx) SetPixel(X + dx, Y, 255, 0, 0, 255);
-		for (int32 dy = -Size; dy <= Size; ++dy) SetPixel(X, Y + dy, 255, 0, 0, 255);
+		for (int32 dx = -Size; dx <= Size; ++dx) SetPixel(X + dx, Y, R, G, B, 255);
+		for (int32 dy = -Size; dy <= Size; ++dy) SetPixel(X, Y + dy, R, G, B, 255);
 		const int32 Radius = 4;
 		for (int32 dx = -Radius; dx <= Radius; ++dx)
 		{
@@ -865,15 +1106,23 @@ void SPnPToolWidget::UpdateRTMarkerOverlay()
 			{
 				if (dx * dx + dy * dy <= Radius * Radius)
 				{
-					SetPixel(X + dx, Y + dy, 255, 0, 0, 255);
+					SetPixel(X + dx, Y + dy, R, G, B, 255);
 				}
 			}
 		}
 	};
 
-	for (const FVector2D& Pt : ManualImagePoints)
+	for (int32 i = 0; i < ManualImagePoints.Num(); ++i)
 	{
-		DrawPoint(FMath::RoundToInt(Pt.X), FMath::RoundToInt(Pt.Y));
+		const FVector2D& Pt = ManualImagePoints[i];
+		if (i == ActivePairIndex)
+		{
+			DrawPoint(FMath::RoundToInt(Pt.X), FMath::RoundToInt(Pt.Y), 255, 255, 0); // 黄=活动
+		}
+		else
+		{
+			DrawPoint(FMath::RoundToInt(Pt.X), FMath::RoundToInt(Pt.Y), 0, 255, 0);   // 绿=普通
+		}
 	}
 
 	void* TextureData = Mip.BulkData.Lock(LOCK_READ_WRITE);
@@ -901,6 +1150,7 @@ FReply SPnPToolWidget::OnClearMarkersClicked()
 	ManualImagePoints.Empty();
 	ManualObjectPoints.Empty();
 	PendingObjectPoint.Reset();
+	ActivePairIndex = INDEX_NONE;
 
 	RTMarkerBrush.DrawAs = ESlateBrushDrawType::NoDrawType;
 	if (RTOverlayImage.IsValid())
@@ -916,6 +1166,7 @@ FReply SPnPToolWidget::OnClearMarkersClicked()
 		}
 	}
 
+	RebuildPairsList();
 	LogMessage(TEXT("[清除] 已清空所有标记点和待配对点"));
 	return FReply::Handled();
 }

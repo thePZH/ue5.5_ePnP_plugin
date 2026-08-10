@@ -64,6 +64,12 @@ private:
 	void   UpdateRTMarkerOverlay();
 	FReply OnClearMarkersClicked();
 
+	// 3D 世界点 → 2D 像素投影（用 SourceCapture 位姿 + 当前内参）
+	// 返回 (U, V)；点在相机后方时返回 (-1, -1)
+	FVector2D ProjectWorldToImage(const FVector& WorldPoint) const;
+	// 重建右侧输入面板里的配对数组 UI
+	void RebuildPairsList();
+
 	FReply OnSolveClicked();
 	UPnPSolverSubsystem* GetSolverSubsystem() const;
 	void ApplyIntrinsicsToSolver(UPnPSolverSubsystem* Solver) const;
@@ -102,6 +108,14 @@ private:
 	TArray<FVector2D> ManualImagePoints;
 	TArray<FVector> ManualObjectPoints;
 	TOptional<FVector> PendingObjectPoint;  // 待配对的 3D 点（红色显示）
+
+	// 当前活动配对索引：右侧 RT 点击会覆盖该配对的 2D 点
+	// - 3D 拾取后自动投影生成新配对时，活动索引 = 最新配对
+	// - 用户可在配对列表中点"设为活动"切换；INDEX_NONE 表示无活动配对
+	int32 ActivePairIndex = INDEX_NONE;
+
+	// 右侧输入面板里的配对数组容器（每行：#i 3D(X,Y,Z) 2D(U,V) 删除 设活动）
+	TSharedPtr<SVerticalBox> PairsListContainer;
 
 	// 日志面板
 	TArray<FString> Messages;

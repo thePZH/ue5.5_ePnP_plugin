@@ -1,8 +1,0 @@
-"/mnt/ssd1t/TestProject/MyProject/Plugins/PnPTool/Intermediate/Build/Linux/x64/UnrealEditor/Development/PnPTool/Module.PnPTool.cpp.o"
- -soname="libUnrealEditor-PnPTool.so"
- -rpath="${ORIGIN}/../../../../../../UnrealEngine5_carla/Engine/Plugins/Runtime/OpenCV/Binaries/Linux"
- -rpath-link="/mnt/ssd1t/TestProject/MyProject/Plugins/PnPTool/Binaries/Linux"
- -L"/mnt/ssd1t/UnrealEngine5_carla/Engine/Binaries/Linux"
- -L"/mnt/ssd1t/UnrealEngine5_carla/Engine/Plugins/Runtime/OpenCV/Binaries/Linux"
- --start-group
- --end-group

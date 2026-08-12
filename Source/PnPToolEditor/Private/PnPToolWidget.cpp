@@ -1672,6 +1672,7 @@ FReply SPnPToolWidget::OnAdd2DPointClicked()
 
 	if (Pending2DPoint.IsSet())
 	{
+		UpdateRTMarkerOverlay();
 		LogMessage(FString::Printf(TEXT("[输入] 2D 点输入模式 | 当前 2D(%.1f, %.1f) 可在右侧 RT 点击调整"),
 			Pending2DPoint.GetValue().X, Pending2DPoint.GetValue().Y));
 	}

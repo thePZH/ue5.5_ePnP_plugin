@@ -1,5 +1,5 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
-
+// 说明：epnp是拟合一个误差最小的相机外参出来，重投影误差是用拟合出来的外参构造投影矩阵，对所有参与的点应用拟合矩阵，得到的点跟输入的2d图像点做差，而每个2d投影点和输入点差的平方和就是重投影误差
 #pragma once
 
 #include "CoreMinimal.h"

@@ -30,6 +30,9 @@
 #include "Engine/Texture2D.h"
 #include "RHIResources.h"
 #include "Rendering/Texture2DResource.h"
+#include "Engine/StaticMeshActor.h"
+#include "UObject/ConstructorHelpers.h"
+#include "Components/StaticMeshComponent.h"
 
 #define LOCTEXT_NAMESPACE "PnPToolWidget"
 
@@ -44,18 +47,31 @@ SPnPToolWidget::~SPnPToolWidget()
 		}
 	}
 
-	if (SceneCapture.IsValid())
+	// 销毁 Pending Marker（未提交的 3D 点）
+	if (PendingMarker.IsValid())
 	{
-		if (UWorld* World = SceneCapture->GetWorld())
+		if (UWorld* World = PendingMarker->GetWorld())
 		{
-			World->DestroyActor(SceneCapture.Get());
+			World->DestroyActor(PendingMarker.Get(), false);
+		}
+		PendingMarker = nullptr;
+	}
+
+	// 销毁所有 3D 标记 Actor
+	DestroyAllMarkerActors();
+
+	if (m_SceneCapture.IsValid())
+	{
+		if (UWorld* World = m_SceneCapture->GetWorld())
+		{
+			World->DestroyActor(m_SceneCapture.Get());
 		}
 	}
-	if (RightSceneCapture.IsValid())
+	if (m_RightSceneCapture.IsValid())
 	{
-		if (UWorld* World = RightSceneCapture->GetWorld())
+		if (UWorld* World = m_RightSceneCapture->GetWorld())
 		{
-			World->DestroyActor(RightSceneCapture.Get());
+			World->DestroyActor(m_RightSceneCapture.Get());
 		}
 	}
 }
@@ -63,21 +79,21 @@ SPnPToolWidget::~SPnPToolWidget()
 void SPnPToolWidget::Construct(const FArguments& InArgs)
 {
 	// 1. 创建左侧场景预览用的 RenderTarget（瞬态对象，不保存）
-	ScenePreviewRT = NewObject<UTextureRenderTarget2D>(GetTransientPackage(), TEXT("PnPScenePreviewRT"), RF_Transient);
-	ScenePreviewRT->InitAutoFormat(960, 540);
-	ScenePreviewRT->UpdateResource();
+	m_ScenePreviewRT = NewObject<UTextureRenderTarget2D>(GetTransientPackage(), TEXT("PnPScenePreviewRT"), RF_Transient);
+	m_ScenePreviewRT->InitAutoFormat(960, 540);
+	m_ScenePreviewRT->UpdateResource();
 
-	SceneBrush.SetResourceObject(ScenePreviewRT.Get());
-	SceneBrush.ImageSize = FVector2D(ScenePreviewRT->SizeX, ScenePreviewRT->SizeY);
-	SceneBrush.DrawAs = ESlateBrushDrawType::Image;
+	m_SceneBrush.SetResourceObject(m_ScenePreviewRT.Get());
+	m_SceneBrush.ImageSize = FVector2D(m_ScenePreviewRT->SizeX, m_ScenePreviewRT->SizeY);
+	m_SceneBrush.DrawAs = ESlateBrushDrawType::Image;
 
 	// 2. 创建右侧显示用的 RenderTarget（与左侧相同的初始化流程，保证 Slate 显示兼容）
-	DisplayRT = NewObject<UTextureRenderTarget2D>(GetTransientPackage(), TEXT("PnPDisplayRT"), RF_Transient);
-	DisplayRT->InitAutoFormat(960, 540);
-	DisplayRT->UpdateResource();
+	m_DisplayRT = NewObject<UTextureRenderTarget2D>(GetTransientPackage(), TEXT("PnPDisplayRT"), RF_Transient);
+	m_DisplayRT->InitAutoFormat(960, 540);
+	m_DisplayRT->UpdateResource();
 
-	RTBrush.SetResourceObject(DisplayRT.Get());
-	RTBrush.ImageSize = FVector2D(DisplayRT->SizeX, DisplayRT->SizeY);
+	RTBrush.SetResourceObject(m_DisplayRT.Get());
+	RTBrush.ImageSize = FVector2D(m_DisplayRT->SizeX, m_DisplayRT->SizeY);
 	RTBrush.DrawAs = ESlateBrushDrawType::Image;
 
 	// 3. 2D 标记点 overlay 画刷（初始不绘制）
@@ -102,7 +118,7 @@ void SPnPToolWidget::Construct(const FArguments& InArgs)
 				+ SVerticalBox::Slot().AutoHeight()
 				[
 					SNew(STextBlock)
-					.Text(LOCTEXT("SceneHeader", "场景视口（左键点击选择3D点）"))
+					.Text(LOCTEXT("SceneHeader", "场景视口（点'添加3D点'按钮后在此点击放置 3D 点）"))
 					.Font(FCoreStyle::GetDefaultFontStyle("Bold", 11))
 				]
 
@@ -112,7 +128,7 @@ void SPnPToolWidget::Construct(const FArguments& InArgs)
 					.HAlign(HAlign_Center)
 					.VAlign(VAlign_Center)
 					[
-						SAssignNew(SceneContainerBox, SBox)
+						SAssignNew(m_SceneContainerBox, SBox)
 						.HAlign(HAlign_Fill)
 						.VAlign(VAlign_Fill)
 						.MinAspectRatio(TAttribute<FOptionalSize>::Create(TAttribute<FOptionalSize>::FGetter::CreateSP(this, &SPnPToolWidget::GetSceneAspectRatio)))
@@ -121,7 +137,7 @@ void SPnPToolWidget::Construct(const FArguments& InArgs)
 							SNew(SBorder)
 							.OnMouseButtonDown(this, &SPnPToolWidget::OnSceneMouseDown)
 							[
-								SAssignNew(SceneImageWidget, SImage)
+								SAssignNew(m_SceneImageWidget, SImage)
 								.Image(this, &SPnPToolWidget::GetSceneBrush)
 							]
 						]
@@ -145,6 +161,7 @@ void SPnPToolWidget::Construct(const FArguments& InArgs)
 
 	// 初始化配对列表空状态显示
 	RebuildPairsList();
+	UpdateInputModeUI();
 }
 
 TSharedRef<SWidget> SPnPToolWidget::BuildInputPanel()
@@ -235,18 +252,7 @@ TSharedRef<SWidget> SPnPToolWidget::BuildInputPanel()
 						.MinValue(1).MaxValue(8192).Delta(1))
 			]
 
-			// RT 资产选择器
-			+ SScrollBox::Slot().Padding(2)
-			[
-				MakeRow(LOCTEXT("rtLabel", "RT"),
-					SNew(SObjectPropertyEntryBox)
-						.AllowedClass(UTextureRenderTarget2D::StaticClass())
-						.ObjectPath(this, &SPnPToolWidget::GetRTPickerPath)
-						.OnObjectChanged(this, &SPnPToolWidget::OnRTChanged)
-				)
-			]
-
-			// 源 SceneCapture2D 选择器
+			// 源 SceneCapture2D 选择器（RT 尺寸自动从其 TextureTarget 获取）
 			+ SScrollBox::Slot().Padding(2)
 			[
 				MakeRow(LOCTEXT("capLabel", "Capture2D"),
@@ -271,6 +277,63 @@ TSharedRef<SWidget> SPnPToolWidget::BuildInputPanel()
 			SNew(SButton)
 				.Text(LOCTEXT("ClearMarkersBtn", "清除所有标记点"))
 				.OnClicked(this, &SPnPToolWidget::OnClearMarkersClicked)
+		]
+
+		// === 点对输入控制 ===
+		+ SScrollBox::Slot().Padding(2, 6, 2, 2)
+		[
+			SNew(SBorder)
+			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
+			.Padding(4)
+			[
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					SNew(STextBlock)
+					.Text(LOCTEXT("PairInputHeader", "点对输入"))
+					.Font(FCoreStyle::GetDefaultFontStyle("Bold", 10))
+				]
+				// 当前编辑状态显示
+				+ SVerticalBox::Slot().AutoHeight().Padding(0, 4, 0, 2)
+				[
+					SAssignNew(CurrentStateText, STextBlock)
+					.Text(FText::FromString(TEXT("状态：空闲")))
+					.ColorAndOpacity(FLinearColor::Gray)
+				]
+				// 三个按钮：添加3D点 / 添加2D点 / 取消
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot().FillWidth(1.0f).Padding(2)
+					[
+						SNew(SButton)
+						.Content()
+						[
+							SAssignNew(Add3DBtnText, STextBlock)
+							.Text(FText::FromString(TEXT("添加3D点")))
+							.Justification(ETextJustify::Type::Center)
+						]
+						.OnClicked(this, &SPnPToolWidget::OnAdd3DPointClicked)
+					]
+					+ SHorizontalBox::Slot().FillWidth(1.0f).Padding(2)
+					[
+						SNew(SButton)
+						.Content()
+						[
+							SAssignNew(Add2DBtnText, STextBlock)
+							.Text(FText::FromString(TEXT("添加2D点")))
+							.Justification(ETextJustify::Type::Center)
+						]
+						.OnClicked(this, &SPnPToolWidget::OnAdd2DPointClicked)
+					]
+					+ SHorizontalBox::Slot().FillWidth(1.0f).Padding(2)
+					[
+						SNew(SButton)
+						.Text(LOCTEXT("CancelEditBtn", "取消"))
+						.OnClicked(this, &SPnPToolWidget::OnCancelEditClicked)
+					]
+				]
+			]
 		]
 
 		// 配对列表（可编辑）
@@ -300,7 +363,7 @@ TSharedRef<SWidget> SPnPToolWidget::BuildRTPreviewPanel()
 			+ SVerticalBox::Slot().AutoHeight()
 			[
 				SNew(STextBlock)
-					.Text(LOCTEXT("RTPreviewHeader", "RT 内容预览（左键点击添加2D点）"))
+					.Text(LOCTEXT("RTPreviewHeader", "RT 内容预览（点'添加2D点'按钮后在此点击放置 2D 点）"))
 					.Font(FCoreStyle::GetDefaultFontStyle("Bold", 11))
 			]
 
@@ -310,7 +373,7 @@ TSharedRef<SWidget> SPnPToolWidget::BuildRTPreviewPanel()
 				.HAlign(HAlign_Center)
 				.VAlign(VAlign_Center)
 				[
-					SAssignNew(RTContainerBox, SBox)
+					SAssignNew(m_RTContainerBox, SBox)
 					.HAlign(HAlign_Fill)
 					.VAlign(VAlign_Fill)
 					.MinAspectRatio(TAttribute<FOptionalSize>::Create(TAttribute<FOptionalSize>::FGetter::CreateSP(this, &SPnPToolWidget::GetRTAspectRatio)))
@@ -324,7 +387,7 @@ TSharedRef<SWidget> SPnPToolWidget::BuildRTPreviewPanel()
 							.HAlign(HAlign_Fill)
 							.VAlign(VAlign_Fill)
 							[
-								SAssignNew(RTImageWidget, SImage)
+								SAssignNew(m_RTImageWidget, SImage)
 								.Image(this, &SPnPToolWidget::GetRTBrush)
 							]
 							+ SOverlay::Slot()
@@ -419,62 +482,46 @@ TSharedRef<SWidget> SPnPToolWidget::BuildResultsPanel()
 		];
 }
 
-FString SPnPToolWidget::GetRTPickerPath() const
-{
-	if (SelectedRT.IsValid())
-	{
-		return SelectedRT->GetPathName();
-	}
-	return FString();
-}
-
-void SPnPToolWidget::OnRTChanged(const FAssetData& InAssetData)
-{
-	SelectedRT = Cast<UTextureRenderTarget2D>(InAssetData.GetAsset());
-
-	if (SelectedRT.IsValid())
-	{
-		LogMessage(FString::Printf(TEXT("[RT] 已选择目标 RT: %s, 尺寸=%dx%d"),
-			*SelectedRT->GetPathName(), SelectedRT->SizeX, SelectedRT->SizeY));
-
-		// 立即同步 DisplayRT 尺寸到目标 RT（Tick 中也会持续跟随）
-		ResizeDisplayRT(SelectedRT->SizeX, SelectedRT->SizeY);
-	}
-	else
-	{
-		LogMessage(TEXT("[RT] Cast<UTextureRenderTarget2D> 失败，可能选错资产类型"));
-	}
-
-	UpdateRTMarkerOverlay();
-}
-
 FString SPnPToolWidget::GetSourceCapturePath() const
 {
-	if (SourceCapture.IsValid())
+	if (m_SourceCapture.IsValid())
 	{
-		return SourceCapture->GetPathName();
+		return m_SourceCapture->GetPathName();
 	}
 	return FString();
 }
 
 void SPnPToolWidget::OnSourceCaptureChanged(const FAssetData& InAssetData)
 {
-	SourceCapture = Cast<ASceneCapture2D>(InAssetData.GetAsset());
-	if (SourceCapture.IsValid())
+	m_SourceCapture = Cast<ASceneCapture2D>(InAssetData.GetAsset());
+	if (m_SourceCapture.IsValid())
 	{
-		LogMessage(FString::Printf(TEXT("[Capture2D] 源 SceneCapture2D 已选择: %s"), *SourceCapture->GetPathName()));
+		LogMessage(FString::Printf(TEXT("[Capture2D] 源 SceneCapture2D 已选择: %s"), *m_SourceCapture->GetPathName()));
+
+		// 从 SceneCapture2D 的 TextureTarget 获取 RT 尺寸并同步 DisplayRT
+		if (USceneCaptureComponent2D* Comp = m_SourceCapture->GetCaptureComponent2D())
+		{
+			if (UTextureRenderTarget2D* SrcRT = Comp->TextureTarget)
+			{
+				ResizeDisplayRT(SrcRT->SizeX, SrcRT->SizeY);
+			}
+			else
+			{
+				LogMessage(TEXT("[Capture2D] 警告：SceneCapture2D 没有 TextureTarget"));
+			}
+		}
 	}
 }
 
 FReply SPnPToolWidget::OnGetIntrinsicsClicked()
 {
-	if (!SourceCapture.IsValid())
+	if (!m_SourceCapture.IsValid())
 	{
 		LogMessage(TEXT("[警告] 请先选择源 SceneCapture2D"));
 		return FReply::Handled();
 	}
 
-	USceneCaptureComponent2D* Comp = SourceCapture->GetCaptureComponent2D();
+	USceneCaptureComponent2D* Comp = m_SourceCapture->GetCaptureComponent2D();
 	if (!Comp || !Comp->TextureTarget)
 	{
 		LogMessage(TEXT("[警告] SceneCapture2D 无 TextureTarget"));
@@ -504,7 +551,7 @@ FReply SPnPToolWidget::OnGetIntrinsicsClicked()
 
 void SPnPToolWidget::EnsureSceneCapture()
 {
-	if (SceneCapture.IsValid()) return;
+	if (m_SceneCapture.IsValid()) return;
 
 	UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
 	if (!World) return;
@@ -512,15 +559,15 @@ void SPnPToolWidget::EnsureSceneCapture()
 	FActorSpawnParameters Params;
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
-	SceneCapture = World->SpawnActor<ASceneCapture2D>(ASceneCapture2D::StaticClass(), FTransform::Identity, Params);
+	m_SceneCapture = World->SpawnActor<ASceneCapture2D>(ASceneCapture2D::StaticClass(), FTransform::Identity, Params);
 
-	if (ASceneCapture2D* Cap = SceneCapture.Get())
+	if (ASceneCapture2D* Cap = m_SceneCapture.Get())
 	{
 		Cap->SetIsTemporarilyHiddenInEditor(true);
 
 		if (USceneCaptureComponent2D* Comp = Cap->GetCaptureComponent2D())
 		{
-			Comp->TextureTarget = ScenePreviewRT.Get();
+			Comp->TextureTarget = m_ScenePreviewRT.Get();
 			Comp->bCaptureEveryFrame = true;
 			Comp->bCaptureOnMovement = false;
 			Comp->CaptureSource = ESceneCaptureSource::SCS_FinalColorLDR;
@@ -530,7 +577,7 @@ void SPnPToolWidget::EnsureSceneCapture()
 
 void SPnPToolWidget::EnsureRightSceneCapture()
 {
-	if (RightSceneCapture.IsValid()) return;
+	if (m_RightSceneCapture.IsValid()) return;
 
 	UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
 	if (!World) return;
@@ -538,15 +585,15 @@ void SPnPToolWidget::EnsureRightSceneCapture()
 	FActorSpawnParameters Params;
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
-	RightSceneCapture = World->SpawnActor<ASceneCapture2D>(ASceneCapture2D::StaticClass(), FTransform::Identity, Params);
+	m_RightSceneCapture = World->SpawnActor<ASceneCapture2D>(ASceneCapture2D::StaticClass(), FTransform::Identity, Params);
 
-	if (ASceneCapture2D* Cap = RightSceneCapture.Get())
+	if (ASceneCapture2D* Cap = m_RightSceneCapture.Get())
 	{
 		Cap->SetIsTemporarilyHiddenInEditor(true);
 
 		if (USceneCaptureComponent2D* Comp = Cap->GetCaptureComponent2D())
 		{
-			Comp->TextureTarget = DisplayRT.Get();
+			Comp->TextureTarget = m_DisplayRT.Get();
 			Comp->bCaptureEveryFrame = true;
 			Comp->bCaptureOnMovement = false;
 			Comp->CaptureSource = ESceneCaptureSource::SCS_FinalColorLDR;
@@ -557,21 +604,21 @@ void SPnPToolWidget::EnsureRightSceneCapture()
 void SPnPToolWidget::ResizeDisplayRT(int32 NewW, int32 NewH)
 {
 	if (NewW <= 0 || NewH <= 0) return;
-	if (!DisplayRT.IsValid()) return;
+	if (!m_DisplayRT.IsValid()) return;
 
 	// 尺寸相同则无需重建
-	if (DisplayRT->SizeX == NewW && DisplayRT->SizeY == NewH)
+	if (m_DisplayRT->SizeX == NewW && m_DisplayRT->SizeY == NewH)
 	{
 		return;
 	}
 
 	// 重新初始化 RT 尺寸（InitAutoFormat 会自动选择合适的像素格式）
-	DisplayRT->InitAutoFormat(NewW, NewH);
-	DisplayRT->UpdateResource();
+	m_DisplayRT->InitAutoFormat(NewW, NewH);
+	m_DisplayRT->UpdateResource();
 
 	// 更新 brush 指向（始终指向 DisplayRT，由 RightSceneCapture 自行捕获内容）
 	RTBrush.SetResourceObject(nullptr);
-	RTBrush.SetResourceObject(DisplayRT.Get());
+	RTBrush.SetResourceObject(m_DisplayRT.Get());
 	RTBrush.ImageSize = FVector2D(NewW, NewH);
 	RTBrush.DrawAs = ESlateBrushDrawType::Image;
 	RTBrush.TintColor = FSlateColor(FLinearColor::White);
@@ -579,9 +626,9 @@ void SPnPToolWidget::ResizeDisplayRT(int32 NewW, int32 NewH)
 	RTBrush.InvalidateResourceHandle();
 #endif
 
-	if (RTImageWidget.IsValid())
+	if (m_RTImageWidget.IsValid())
 	{
-		RTImageWidget->Invalidate(EInvalidateWidget::Layout | EInvalidateWidget::Paint);
+		m_RTImageWidget->Invalidate(EInvalidateWidget::Layout | EInvalidateWidget::Paint);
 	}
 
 	LogMessage(FString::Printf(TEXT("[RT] DisplayRT 已调整尺寸为 %dx%d"), NewW, NewH));
@@ -589,7 +636,7 @@ void SPnPToolWidget::ResizeDisplayRT(int32 NewW, int32 NewH)
 
 void SPnPToolWidget::UpdateSceneCaptureFromActiveViewport() const
 {
-	if (!SceneCapture.IsValid()) return;
+	if (!m_SceneCapture.IsValid()) return;
 
 	FViewport* ActiveVP = GEditor ? GEditor->GetActiveViewport() : nullptr;
 	FEditorViewportClient* VPC = (ActiveVP && ActiveVP->GetClient())
@@ -598,8 +645,8 @@ void SPnPToolWidget::UpdateSceneCaptureFromActiveViewport() const
 
 	if (VPC && VPC->IsPerspective())
 	{
-		SceneCapture->SetActorLocation(VPC->GetViewLocation());
-		SceneCapture->SetActorRotation(VPC->GetViewRotation());
+		m_SceneCapture->SetActorLocation(VPC->GetViewLocation());
+		m_SceneCapture->SetActorRotation(VPC->GetViewRotation());
 	}
 }
 
@@ -610,17 +657,17 @@ void SPnPToolWidget::Tick(const FGeometry& AllottedGeometry, const double InCurr
 	UpdateSceneCaptureFromActiveViewport();
 
 	// 将右侧插件创建的 SceneCapture 位置/朝向与用户选择的 SourceCapture 同步（若无，则跟随编辑器视口）
-	if (RightSceneCapture.IsValid())
+	if (m_RightSceneCapture.IsValid())
 	{
-		if (SourceCapture.IsValid())
+		if (m_SourceCapture.IsValid())
 		{
-			RightSceneCapture->SetActorLocation(SourceCapture->GetActorLocation());
-			RightSceneCapture->SetActorRotation(SourceCapture->GetActorRotation());
+			m_RightSceneCapture->SetActorLocation(m_SourceCapture->GetActorLocation());
+			m_RightSceneCapture->SetActorRotation(m_SourceCapture->GetActorRotation());
 
 			// 同步 FOV，使右侧视口捕获画面与 SourceCapture 一致
-			if (USceneCaptureComponent2D* RightComp = RightSceneCapture->GetCaptureComponent2D())
+			if (USceneCaptureComponent2D* RightComp = m_RightSceneCapture->GetCaptureComponent2D())
 			{
-				if (USceneCaptureComponent2D* SrcComp = SourceCapture->GetCaptureComponent2D())
+				if (USceneCaptureComponent2D* SrcComp = m_SourceCapture->GetCaptureComponent2D())
 				{
 					RightComp->FOVAngle = SrcComp->FOVAngle;
 				}
@@ -632,59 +679,76 @@ void SPnPToolWidget::Tick(const FGeometry& AllottedGeometry, const double InCurr
 			FEditorViewportClient* VPC = (ActiveVP && ActiveVP->GetClient()) ? static_cast<FEditorViewportClient*>(ActiveVP->GetClient()) : nullptr;
 			if (VPC && VPC->IsPerspective())
 			{
-				RightSceneCapture->SetActorLocation(VPC->GetViewLocation());
-				RightSceneCapture->SetActorRotation(VPC->GetViewRotation());
+				m_RightSceneCapture->SetActorLocation(VPC->GetViewLocation());
+				m_RightSceneCapture->SetActorRotation(VPC->GetViewRotation());
 			}
 		}
 	}
 
-	// 实时跟随目标 RT（SelectedRT）的尺寸，保持 DisplayRT 与之一致
-	if (SelectedRT.IsValid() && DisplayRT.IsValid())
+	// 实时跟随 SourceCapture 的 TextureTarget 尺寸，保持 DisplayRT 与之一致
+	if (m_SourceCapture.IsValid() && m_DisplayRT.IsValid())
 	{
-		if (DisplayRT->SizeX != SelectedRT->SizeX || DisplayRT->SizeY != SelectedRT->SizeY)
+		if (USceneCaptureComponent2D* Comp = m_SourceCapture->GetCaptureComponent2D())
 		{
-			ResizeDisplayRT(SelectedRT->SizeX, SelectedRT->SizeY);
+			if (UTextureRenderTarget2D* SrcRT = Comp->TextureTarget)
+			{
+				if (m_DisplayRT->SizeX != SrcRT->SizeX || m_DisplayRT->SizeY != SrcRT->SizeY)
+				{
+					ResizeDisplayRT(SrcRT->SizeX, SrcRT->SizeY);
+				}
+			}
 		}
 	}
 
-	// 只在点变化时重绘 debug，避免每帧 FlushPersistentDebugLines 导致闪烁
+	// 同步 Marker Actor 位置 → 数据（用户用 Gizmo 拖动后自动更新配对）
+	SyncMarkerActorsInTick();
+
+	// 只在点数 / 输入模式 / 活动 pair / Pending 状态变化时重绘 debug
 	static int32 LastObjCount = -1;
-	static bool bLastPending = false;
-	const bool bNeedRedraw = (LastObjCount != ManualObjectPoints.Num()) || (bLastPending != PendingObjectPoint.IsSet());
+	static EInputMode LastMode = EInputMode::Idle;
+	static int32 LastActiveIdx = INDEX_NONE;
+	static bool bLastPending3D = false;
+	const bool bHasPending3D = Pending3DPoint.IsSet();
+	const bool bNeedRedraw = (LastObjCount != ManualObjectPoints.Num())
+		|| (LastMode != InputMode)
+		|| (LastActiveIdx != ActivePairIndex)
+		|| (bLastPending3D != bHasPending3D);
 	if (bNeedRedraw)
 	{
 		DrawManualMarkers();
 		LastObjCount = ManualObjectPoints.Num();
-		bLastPending = PendingObjectPoint.IsSet();
+		LastMode = InputMode;
+		LastActiveIdx = ActivePairIndex;
+		bLastPending3D = bHasPending3D;
 	}
 }
 
 FOptionalSize SPnPToolWidget::GetSceneAspectRatio() const
 {
-	if (ScenePreviewRT.IsValid() && ScenePreviewRT->SizeY > 0)
+	if (m_ScenePreviewRT.IsValid() && m_ScenePreviewRT->SizeY > 0)
 	{
-		return FOptionalSize(static_cast<float>(ScenePreviewRT->SizeX) / static_cast<float>(ScenePreviewRT->SizeY));
+		return FOptionalSize(static_cast<float>(m_ScenePreviewRT->SizeX) / static_cast<float>(m_ScenePreviewRT->SizeY));
 	}
 	return FOptionalSize(16.0f / 9.0f);
 }
 
 FOptionalSize SPnPToolWidget::GetRTAspectRatio() const
 {
-	if (DisplayRT.IsValid() && DisplayRT->SizeY > 0)
+	if (m_DisplayRT.IsValid() && m_DisplayRT->SizeY > 0)
 	{
-		return FOptionalSize(static_cast<float>(DisplayRT->SizeX) / static_cast<float>(DisplayRT->SizeY));
+		return FOptionalSize(static_cast<float>(m_DisplayRT->SizeX) / static_cast<float>(m_DisplayRT->SizeY));
 	}
 	return FOptionalSize(16.0f / 9.0f);
 }
 
 FVector2D SPnPToolWidget::ProjectWorldToImage(const FVector& WorldPoint) const
 {
-	if (!SourceCapture.IsValid())
+	if (!m_SourceCapture.IsValid())
 	{
 		return FVector2D(-1.0, -1.0);
 	}
-	const FVector CamLoc = SourceCapture->GetActorLocation();
-	const FRotator CamRot = SourceCapture->GetActorRotation();
+	const FVector CamLoc = m_SourceCapture->GetActorLocation();
+	const FRotator CamRot = m_SourceCapture->GetActorRotation();
 	// 世界 → UE 相机空间（X 前 Y 右 Z 上）
 	const FVector PCam = CamRot.UnrotateVector(WorldPoint - CamLoc);
 	if (PCam.X <= KINDA_SMALL_NUMBER)
@@ -708,160 +772,411 @@ void SPnPToolWidget::RebuildPairsList()
 		SNew(SHorizontalBox)
 		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(2, 2, 6, 2)
 		[
-			SNew(STextBlock).Text(LOCTEXT("PairsHeader", "配对列表（3D / 2D 可编辑，黄色=活动，右侧RT点击覆盖活动2D）"))
+			SNew(STextBlock).Text(LOCTEXT("PairsHeader", "已提交配对列表（黄色=编辑中 | 编辑3D/编辑2D=重新放置该点 | SpinBox可直接改数值）"))
 			.Font(FCoreStyle::GetDefaultFontStyle("Bold", 9))
 		]
 	];
+
+	// 清空旧的行引用（widget 已被销毁）
+	PairRowWidgets.Empty();
 
 	if (ManualObjectPoints.Num() == 0)
 	{
 		PairsListContainer->AddSlot().AutoHeight().Padding(2)
 		[
 			SNew(STextBlock)
-			.Text(LOCTEXT("PairsEmpty", "（无配对。在左侧场景视口点击 3D 点开始）"))
+			.Text(LOCTEXT("PairsEmpty", "（无配对。点上方'添加3D点'开始新建 pair）"))
 			.ColorAndOpacity(FLinearColor::Gray)
 		];
 		return;
 	}
 
-	auto MakeCoordBox = [](double InitialValue, TFunction<void(double)> OnCommit) -> TSharedRef<SWidget>
-	{
-		return SNew(SSpinBox<double>)
-			.Value(InitialValue)
-			.MinValue(-1000000.0).MaxValue(1000000.0).Delta(1.0)
-			.MinDesiredWidth(70.0f)
-			.OnValueCommitted_Lambda([OnCommit](double V, ETextCommit::Type) { OnCommit(V); });
-	};
-
 	for (int32 i = 0; i < ManualObjectPoints.Num(); ++i)
 	{
-		const bool bIsActive = (i == ActivePairIndex);
-		const int32 CapturedIdx = i; // 供 lambda 捕获，重建后该行 widget 销毁，索引仍有效
+		const int32 CapturedIdx = i;
 
-		PairsListContainer->AddSlot().AutoHeight().Padding(2)
-		[
-			SNew(SBorder)
-			.BorderBackgroundColor_Lambda([this, CapturedIdx]()
+		// 创建 5 个 SpinBox（先创建，后面需要引用填充）
+		TSharedRef<SSpinBox<double>> Spin3DX = SNew(SSpinBox<double>)
+			.Value(ManualObjectPoints[i].X)
+			.MinValue(-1000000.0).MaxValue(1000000.0).Delta(1.0)
+			.MinDesiredWidth(70.0f)
+			.OnValueCommitted_Lambda([this, CapturedIdx](double V, ETextCommit::Type)
 			{
-				return (CapturedIdx == ActivePairIndex)
-					? FLinearColor(1.0f, 0.85f, 0.0f, 0.45f)
-					: FLinearColor(0.18f, 0.18f, 0.18f, 0.4f);
-			})
-			.Padding(2)
+				if (ManualObjectPoints.IsValidIndex(CapturedIdx))
+				{
+					ManualObjectPoints[CapturedIdx].X = V;
+					if (AActor* M = MarkerActors.IsValidIndex(CapturedIdx) ? MarkerActors[CapturedIdx].Get() : nullptr)
+						M->SetActorLocation(ManualObjectPoints[CapturedIdx]);
+					DrawManualMarkers();
+				}
+			});
+
+		TSharedRef<SSpinBox<double>> Spin3DY = SNew(SSpinBox<double>)
+			.Value(ManualObjectPoints[i].Y)
+			.MinValue(-1000000.0).MaxValue(1000000.0).Delta(1.0)
+			.MinDesiredWidth(70.0f)
+			.OnValueCommitted_Lambda([this, CapturedIdx](double V, ETextCommit::Type)
+			{
+				if (ManualObjectPoints.IsValidIndex(CapturedIdx))
+				{
+					ManualObjectPoints[CapturedIdx].Y = V;
+					if (AActor* M = MarkerActors.IsValidIndex(CapturedIdx) ? MarkerActors[CapturedIdx].Get() : nullptr)
+						M->SetActorLocation(ManualObjectPoints[CapturedIdx]);
+					DrawManualMarkers();
+				}
+			});
+
+		TSharedRef<SSpinBox<double>> Spin3DZ = SNew(SSpinBox<double>)
+			.Value(ManualObjectPoints[i].Z)
+			.MinValue(-1000000.0).MaxValue(1000000.0).Delta(1.0)
+			.MinDesiredWidth(70.0f)
+			.OnValueCommitted_Lambda([this, CapturedIdx](double V, ETextCommit::Type)
+			{
+				if (ManualObjectPoints.IsValidIndex(CapturedIdx))
+				{
+					ManualObjectPoints[CapturedIdx].Z = V;
+					if (AActor* M = MarkerActors.IsValidIndex(CapturedIdx) ? MarkerActors[CapturedIdx].Get() : nullptr)
+						M->SetActorLocation(ManualObjectPoints[CapturedIdx]);
+					DrawManualMarkers();
+				}
+			});
+
+		TSharedRef<SSpinBox<double>> Spin2DU = SNew(SSpinBox<double>)
+			.Value(ManualImagePoints[i].X)
+			.MinValue(-1000000.0).MaxValue(1000000.0).Delta(1.0)
+			.MinDesiredWidth(70.0f)
+			.OnValueCommitted_Lambda([this, CapturedIdx](double V, ETextCommit::Type)
+			{
+				if (ManualImagePoints.IsValidIndex(CapturedIdx))
+				{
+					ManualImagePoints[CapturedIdx].X = V;
+					UpdateRTMarkerOverlay();
+				}
+			});
+
+		TSharedRef<SSpinBox<double>> Spin2DV = SNew(SSpinBox<double>)
+			.Value(ManualImagePoints[i].Y)
+			.MinValue(-1000000.0).MaxValue(1000000.0).Delta(1.0)
+			.MinDesiredWidth(70.0f)
+			.OnValueCommitted_Lambda([this, CapturedIdx](double V, ETextCommit::Type)
+			{
+				if (ManualImagePoints.IsValidIndex(CapturedIdx))
+				{
+					ManualImagePoints[CapturedIdx].Y = V;
+					UpdateRTMarkerOverlay();
+				}
+			});
+
+		TSharedRef<SBorder> RowBorder = SNew(SBorder)
+		.Padding(2);
+
+	TSharedPtr<STextBlock> Edit3DBtnText;
+	TSharedPtr<STextBlock> Edit2DBtnText;
+
+	// 编辑 3D 点按钮：选中该 pair 并进入 3D 点编辑模式
+	TSharedRef<SButton> Edit3DBtn = SNew(SButton)
+		.Content()
+		[
+			SAssignNew(Edit3DBtnText, STextBlock)
+			.Text(FText::FromString(TEXT("编辑3D")))
+			.Justification(ETextJustify::Type::Center)
+		]
+		.OnClicked_Lambda([this, CapturedIdx]() -> FReply
+		{
+			// 如果有未提交的 Pending pair，先取消
+			CancelPendingEdit();
+			ActivePairIndex = CapturedIdx;
+			InputMode = EInputMode::Edit3D;
+			UpdateInputModeUI();
+			DrawManualMarkers();
+			UpdateRTMarkerOverlay();
+			LogMessage(FString::Printf(TEXT("[编辑] 配对 #%d 进入 3D 点编辑模式，请在左侧场景视口点击新位置"), CapturedIdx));
+			return FReply::Handled();
+		});
+
+	// 编辑 2D 点按钮：选中该 pair 并进入 2D 点编辑模式
+	TSharedRef<SButton> Edit2DBtn = SNew(SButton)
+		.Content()
+		[
+			SAssignNew(Edit2DBtnText, STextBlock)
+			.Text(FText::FromString(TEXT("编辑2D")))
+			.Justification(ETextJustify::Type::Center)
+		]
+		.OnClicked_Lambda([this, CapturedIdx]() -> FReply
+		{
+			// 如果有未提交的 Pending pair，先取消
+			CancelPendingEdit();
+			ActivePairIndex = CapturedIdx;
+			InputMode = EInputMode::Edit2D;
+			UpdateInputModeUI();
+			DrawManualMarkers();
+			UpdateRTMarkerOverlay();
+			LogMessage(FString::Printf(TEXT("[编辑] 配对 #%d 进入 2D 点编辑模式，请在右侧 RT 点击新位置"), CapturedIdx));
+			return FReply::Handled();
+		});
+
+	// 删除按钮
+	TSharedRef<SButton> DeleteBtn = SNew(SButton)
+		.Text(FText::FromString(TEXT("删除")))
+		.OnClicked_Lambda([this, CapturedIdx]() -> FReply
+		{
+			if (ManualObjectPoints.IsValidIndex(CapturedIdx))
+			{
+				ManualObjectPoints.RemoveAt(CapturedIdx);
+				ManualImagePoints.RemoveAt(CapturedIdx);
+				DestroyMarkerActor(CapturedIdx);
+				MarkerActors.RemoveAt(CapturedIdx);
+
+				if (ActivePairIndex == CapturedIdx)
+				{
+					ActivePairIndex = INDEX_NONE;
+					InputMode = EInputMode::Idle;
+				}
+				else if (ActivePairIndex > CapturedIdx)
+				{
+					ActivePairIndex--;
+				}
+
+				RebuildPairsList();
+				UpdateInputModeUI();
+				UpdateRTMarkerOverlay();
+				DrawManualMarkers();
+			}
+			return FReply::Handled();
+		});
+
+		// 组装行：先创建内容，再 SetContent 到 RowBorder（避免 TSharedRef 不支持 [] 操作符的问题）
+		RowBorder->SetBorderBackgroundColor(FLinearColor(0.18f, 0.18f, 0.18f, 0.4f));
+
+		TSharedRef<SHorizontalBox> RowContent = SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(2)
 			[
-				SNew(SHorizontalBox)
-
-				// #i
-				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(2)
-				[
-					SNew(STextBlock).Text(FText::FromString(FString::Printf(TEXT("#%d"), i)))
-				]
-
-				// 3D X
-				+ SHorizontalBox::Slot().FillWidth(1.0f)
-				[
-					MakeCoordBox(ManualObjectPoints[i].X, [this, CapturedIdx](double V)
-					{
-						if (ManualObjectPoints.IsValidIndex(CapturedIdx))
-						{
-							ManualObjectPoints[CapturedIdx].X = V;
-							DrawManualMarkers();
-						}
-					})
-				]
-				// 3D Y
-				+ SHorizontalBox::Slot().FillWidth(1.0f)
-				[
-					MakeCoordBox(ManualObjectPoints[i].Y, [this, CapturedIdx](double V)
-					{
-						if (ManualObjectPoints.IsValidIndex(CapturedIdx))
-						{
-							ManualObjectPoints[CapturedIdx].Y = V;
-							DrawManualMarkers();
-						}
-					})
-				]
-				// 3D Z
-				+ SHorizontalBox::Slot().FillWidth(1.0f)
-				[
-					MakeCoordBox(ManualObjectPoints[i].Z, [this, CapturedIdx](double V)
-					{
-						if (ManualObjectPoints.IsValidIndex(CapturedIdx))
-						{
-							ManualObjectPoints[CapturedIdx].Z = V;
-							DrawManualMarkers();
-						}
-					})
-				]
-
-				// 分隔
-				+ SHorizontalBox::Slot().AutoWidth().Padding(4, 0)
-				[
-					SNew(STextBlock).Text(FText::FromString(TEXT("<->")))
-				]
-
-				// 2D U
-				+ SHorizontalBox::Slot().FillWidth(1.0f)
-				[
-					MakeCoordBox(ManualImagePoints[i].X, [this, CapturedIdx](double V)
-					{
-						if (ManualImagePoints.IsValidIndex(CapturedIdx))
-						{
-							ManualImagePoints[CapturedIdx].X = V;
-							UpdateRTMarkerOverlay();
-						}
-					})
-				]
-				// 2D V
-				+ SHorizontalBox::Slot().FillWidth(1.0f)
-				[
-					MakeCoordBox(ManualImagePoints[i].Y, [this, CapturedIdx](double V)
-					{
-						if (ManualImagePoints.IsValidIndex(CapturedIdx))
-						{
-							ManualImagePoints[CapturedIdx].Y = V;
-							UpdateRTMarkerOverlay();
-						}
-					})
-				]
-
-				// 设为活动
-				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(2, 0)
-				[
-					SNew(SButton)
-					.Text(FText::FromString(bIsActive ? TEXT("●活动") : TEXT("设活动")))
-					.OnClicked_Lambda([this, CapturedIdx]() -> FReply
-					{
-						ActivePairIndex = CapturedIdx;
-						RebuildPairsList();
-						UpdateRTMarkerOverlay();
-						DrawManualMarkers();
-						return FReply::Handled();
-					})
-				]
-
-				// 删除
-				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(2, 0)
-				[
-					SNew(SButton)
-					.Text(FText::FromString(TEXT("删除")))
-					.OnClicked_Lambda([this, CapturedIdx]() -> FReply
-					{
-						if (ManualObjectPoints.IsValidIndex(CapturedIdx))
-						{
-							ManualObjectPoints.RemoveAt(CapturedIdx);
-							ManualImagePoints.RemoveAt(CapturedIdx);
-							if (ActivePairIndex == CapturedIdx) ActivePairIndex = INDEX_NONE;
-							else if (ActivePairIndex > CapturedIdx) ActivePairIndex--;
-							RebuildPairsList();
-							UpdateRTMarkerOverlay();
-							DrawManualMarkers();
-						}
-						return FReply::Handled();
-					})
-				]
+				SNew(STextBlock).Text(FText::FromString(FString::Printf(TEXT("#%d"), i)))
 			]
+			+ SHorizontalBox::Slot().FillWidth(1.0f)
+			[
+				Spin3DX
+			]
+			+ SHorizontalBox::Slot().FillWidth(1.0f)
+			[
+				Spin3DY
+			]
+			+ SHorizontalBox::Slot().FillWidth(1.0f)
+			[
+				Spin3DZ
+			]
+			+ SHorizontalBox::Slot().AutoWidth().Padding(4, 0)
+			[
+				SNew(STextBlock).Text(FText::FromString(TEXT("<->")))
+			]
+			+ SHorizontalBox::Slot().FillWidth(1.0f)
+			[
+				Spin2DU
+			]
+			+ SHorizontalBox::Slot().FillWidth(1.0f)
+			[
+				Spin2DV
+			]
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(2, 0)
+		[
+			Edit3DBtn
+		]
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(2, 0)
+		[
+			Edit2DBtn
+		]
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(2, 0)
+		[
+			DeleteBtn
 		];
+
+	RowBorder->SetContent(RowContent);
+
+	PairsListContainer->AddSlot().AutoHeight().Padding(2)
+	[
+		RowBorder
+	];
+
+	// 存储行引用（TSharedRef → TSharedPtr 自动转换）
+	FPairRowWidgets RowW;
+	RowW.Spin3DX = Spin3DX;
+	RowW.Spin3DY = Spin3DY;
+	RowW.Spin3DZ = Spin3DZ;
+	RowW.Spin2DU = Spin2DU;
+	RowW.Spin2DV = Spin2DV;
+	RowW.RowBorder = RowBorder;
+	RowW.Edit3DBtnText = Edit3DBtnText;
+	RowW.Edit2DBtnText = Edit2DBtnText;
+	PairRowWidgets.Add(RowW);
+	}
+
+	// 初始活动状态视觉
+	UpdateActiveRowVisuals();
+}
+
+void SPnPToolWidget::UpdatePairRowValues(int32 Index)
+{
+	if (!ManualObjectPoints.IsValidIndex(Index) || !ManualImagePoints.IsValidIndex(Index)) return;
+	if (!PairRowWidgets.IsValidIndex(Index)) return;
+
+	const FVector& Pt = ManualObjectPoints[Index];
+	const FVector2D& UV = ManualImagePoints[Index];
+	FPairRowWidgets& Row = PairRowWidgets[Index];
+
+	// 只在值变化时更新（避免不必要的 widget 刷新）
+	if (!FMath::IsNearlyEqual(Row.Spin3DX->GetValue(), Pt.X, 0.01))
+		Row.Spin3DX->SetValue(Pt.X);
+	if (!FMath::IsNearlyEqual(Row.Spin3DY->GetValue(), Pt.Y, 0.01))
+		Row.Spin3DY->SetValue(Pt.Y);
+	if (!FMath::IsNearlyEqual(Row.Spin3DZ->GetValue(), Pt.Z, 0.01))
+		Row.Spin3DZ->SetValue(Pt.Z);
+	if (!FMath::IsNearlyEqual(Row.Spin2DU->GetValue(), UV.X, 0.01))
+		Row.Spin2DU->SetValue(UV.X);
+	if (!FMath::IsNearlyEqual(Row.Spin2DV->GetValue(), UV.Y, 0.01))
+		Row.Spin2DV->SetValue(UV.Y);
+}
+
+void SPnPToolWidget::UpdateActiveRowVisuals()
+{
+	for (int32 i = 0; i < PairRowWidgets.Num(); ++i)
+	{
+		const bool bActive = (i == ActivePairIndex);
+		PairRowWidgets[i].RowBorder->SetBorderBackgroundColor(
+			bActive ? FLinearColor(1.0f, 0.85f, 0.0f, 0.45f)
+					: FLinearColor(0.18f, 0.18f, 0.18f, 0.4f));
+
+		// 编辑3D 按钮文字反映当前是否在编辑该 pair 的 3D 点
+		if (PairRowWidgets[i].Edit3DBtnText.IsValid())
+		{
+			const bool bEditing3D = bActive && (InputMode == EInputMode::Edit3D);
+			PairRowWidgets[i].Edit3DBtnText->SetText(FText::FromString(bEditing3D ? TEXT("●3D编辑中") : TEXT("编辑3D")));
+		}
+
+		// 编辑2D 按钮文字反映当前是否在编辑该 pair 的 2D 点
+		if (PairRowWidgets[i].Edit2DBtnText.IsValid())
+		{
+			const bool bEditing2D = bActive && (InputMode == EInputMode::Edit2D);
+			PairRowWidgets[i].Edit2DBtnText->SetText(FText::FromString(bEditing2D ? TEXT("●2D编辑中") : TEXT("编辑2D")));
+		}
+	}
+}
+
+void SPnPToolWidget::CreateMarkerActor(int32 Index)
+{
+	if (!ManualObjectPoints.IsValidIndex(Index)) return;
+	if (!GEditor) return;
+	UWorld* World = GEditor->GetEditorWorldContext().World();
+	if (!World) return;
+
+	// 缓存 Sphere mesh（避免每次加载）
+	static UStaticMesh* SphereMesh = nullptr;
+	if (!SphereMesh)
+	{
+		SphereMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Sphere"));
+		if (!SphereMesh) return;
+	}
+
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+	AStaticMeshActor* Marker = World->SpawnActor<AStaticMeshActor>(
+		ManualObjectPoints[Index], FRotator::ZeroRotator, Params);
+	if (!Marker) return;
+
+	if (UStaticMeshComponent* MeshComp = Marker->GetStaticMeshComponent())
+	{
+		MeshComp->SetStaticMesh(SphereMesh);
+		// Engine Sphere 默认 50cm 半径，缩放到 0.1→约 0.5cm，小巧不挡视野
+		MeshComp->SetWorldScale3D(FVector(0.1f));
+		MeshComp->SetMobility(EComponentMobility::Movable);
+		MeshComp->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+		MeshComp->SetCollisionResponseToAllChannels(ECR_Ignore);
+		MeshComp->SetCastShadow(false);
+		// 选中时高亮（编辑器默认行为），无需额外材质
+	}
+
+	const bool bActive = (Index == ActivePairIndex);
+	Marker->SetActorLabel(FString::Printf(TEXT("PnP #%d%s"), Index, bActive ? TEXT(" *") : TEXT("")));
+	// 不在场景里保存
+	Marker->SetFlags(RF_Transient);
+
+	// 保证数组对齐
+	if (MarkerActors.Num() <= Index)
+	{
+		MarkerActors.SetNum(Index + 1);
+	}
+	MarkerActors[Index] = Marker;
+}
+
+void SPnPToolWidget::DestroyMarkerActor(int32 Index)
+{
+	if (!MarkerActors.IsValidIndex(Index)) return;
+	if (AActor* Marker = MarkerActors[Index].Get())
+	{
+		if (UWorld* World = Marker->GetWorld())
+		{
+			World->DestroyActor(Marker, false);
+		}
+	}
+	MarkerActors[Index] = nullptr;
+}
+
+void SPnPToolWidget::DestroyAllMarkerActors()
+{
+	for (int32 i = 0; i < MarkerActors.Num(); ++i)
+	{
+		if (AActor* Marker = MarkerActors[i].Get())
+		{
+			if (UWorld* World = Marker->GetWorld())
+			{
+				World->DestroyActor(Marker, false);
+			}
+		}
+	}
+	MarkerActors.Empty();
+}
+
+void SPnPToolWidget::SyncMarkerActorsInTick()
+{
+	// 检测 Marker Actor 被用户用 Gizmo 拖动 → 同步位置到数据
+	bool bAnyChanged = false;
+
+	// 1. 已提交 pair 的 Marker
+	const int32 Count = FMath::Min(MarkerActors.Num(), ManualObjectPoints.Num());
+	for (int32 i = 0; i < Count; ++i)
+	{
+		AActor* Marker = MarkerActors[i].Get();
+		if (!Marker) continue;
+		const FVector Current = Marker->GetActorLocation();
+		if (!Current.Equals(ManualObjectPoints[i], 0.5))
+		{
+			ManualObjectPoints[i] = Current;
+
+			// 编辑 3D 点模式且为活动 pair 时，2D 点可选择性重投影（这里不自动重投影，保持用户手动值）
+			// 仅更新 3D 点数据，2D 点由用户在 RT 点击时设置
+
+			// 原地更新该行程数值（不重建列表，避免闪烁）
+			UpdatePairRowValues(i);
+			bAnyChanged = true;
+		}
+	}
+
+	// 2. Pending Marker（新建 pair 的 3D 点）
+	if (PendingMarker.IsValid() && Pending3DPoint.IsSet())
+	{
+		AActor* Marker = PendingMarker.Get();
+		const FVector Current = Marker->GetActorLocation();
+		if (!Current.Equals(Pending3DPoint.GetValue(), 0.5))
+		{
+			Pending3DPoint = Current;
+			bAnyChanged = true;
+		}
+	}
+
+	if (bAnyChanged)
+	{
+		UpdateInputModeUI();
+		UpdateRTMarkerOverlay();
 	}
 }
 
@@ -875,35 +1190,59 @@ void SPnPToolWidget::DrawManualMarkers()
 	// 清除旧的持久调试绘制
 	FlushPersistentDebugLines(World);
 
-	// 已配对的点用绿色；当前活动配对用黄色高亮（提示右侧 RT 点击会覆盖其 2D）
+	// 已提交 pair 的 Marker：更新 Label 和 Scale 反映编辑状态
 	for (int32 i = 0; i < ManualObjectPoints.Num(); ++i)
 	{
-		const FVector& Pt = ManualObjectPoints[i];
-		const bool bActive = (i == ActivePairIndex);
-		const FColor PtColor = bActive ? FColor::Yellow : FColor::Green;
-		DrawDebugSphere(World, Pt, bActive ? 12.0f : 10.0f, 12, PtColor, true, -1.0f, 0, bActive ? 3.0f : 2.0f);
-		const FString Label = FString::Printf(TEXT("#%d%s"), i, bActive ? TEXT(" (活动)") : TEXT(""));
-		DrawDebugString(World, Pt + FVector(0, 0, 20.0f), Label, nullptr, PtColor, 0.0f, true);
+		if (AActor* Marker = MarkerActors.IsValidIndex(i) ? MarkerActors[i].Get() : nullptr)
+		{
+			const bool bActive = (i == ActivePairIndex);
+			FString Suffix;
+			if (bActive)
+			{
+				if (InputMode == EInputMode::Edit3D) Suffix += TEXT(" [3D编辑中]");
+				else if (InputMode == EInputMode::Edit2D) Suffix += TEXT(" [2D编辑中]");
+				else Suffix += TEXT(" *");
+			}
+			Marker->SetActorLabel(FString::Printf(TEXT("PnP #%d%s"), i, *Suffix));
+			if (UStaticMeshComponent* MeshComp = Cast<AStaticMeshActor>(Marker) ? Cast<AStaticMeshActor>(Marker)->GetStaticMeshComponent() : nullptr)
+			{
+				float Scale = 0.1f;
+				if (bActive)
+				{
+					if (InputMode == EInputMode::Edit3D) Scale = 0.2f;
+					else Scale = 0.15f;
+				}
+				MeshComp->SetWorldScale3D(FVector(Scale));
+			}
+		}
 	}
 
-	// 待配对的点用红色
-	if (PendingObjectPoint.IsSet())
+	// Pending Marker（新建 pair 的 3D 点，未提交）
+	if (PendingMarker.IsValid())
 	{
-		const FVector& Pt = PendingObjectPoint.GetValue();
-		DrawDebugSphere(World, Pt, 12.0f, 12, FColor::Red, true, -1.0f, 0, 3.0f);
-		DrawDebugString(World, Pt + FVector(0, 0, 25.0f), TEXT("pending"), nullptr, FColor::Red, 0.0f, true);
+		AActor* Marker = PendingMarker.Get();
+		FString Suffix;
+		if (InputMode == EInputMode::Edit3D) Suffix = TEXT(" [3D输入中]");
+		else if (InputMode == EInputMode::Edit2D) Suffix = TEXT(" [2D输入中]");
+		else Suffix = TEXT(" [待提交]");
+		Marker->SetActorLabel(FString::Printf(TEXT("PnP Pending%s"), *Suffix));
+		if (UStaticMeshComponent* MeshComp = Cast<AStaticMeshActor>(Marker) ? Cast<AStaticMeshActor>(Marker)->GetStaticMeshComponent() : nullptr)
+		{
+			const float Scale = (InputMode == EInputMode::Edit3D) ? 0.2f : 0.15f;
+			MeshComp->SetWorldScale3D(FVector(Scale));
+		}
 	}
 }
 
 FReply SPnPToolWidget::OnSceneMouseDown(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent)
 {
 	if (MouseEvent.GetEffectingButton() != EKeys::LeftMouseButton) return FReply::Handled();
-	if (!ScenePreviewRT.IsValid() || !SceneCapture.IsValid()) return FReply::Handled();
+	if (!m_ScenePreviewRT.IsValid() || !m_SceneCapture.IsValid()) return FReply::Handled();
 
-	// 仅在无 SourceCapture 的回退流程中，要求先完成上一个待配对点
-	if (!SourceCapture.IsValid() && PendingObjectPoint.IsSet())
+	// 只有 Edit3D 模式才处理 3D 视口点击
+	if (InputMode != EInputMode::Edit3D)
 	{
-		LogMessage(TEXT("[警告] 当前已有未配对的 3D 点（红色），请先在右侧 RT 上点击对应 2D 点完成配对"));
+		LogMessage(TEXT("[提示] 请先点'添加3D点'按钮进入 3D 点输入模式"));
 		return FReply::Handled();
 	}
 
@@ -928,13 +1267,13 @@ FReply SPnPToolWidget::OnSceneMouseDown(const FGeometry& MyGeometry, const FPoin
 
 	// FOV：优先用 SceneCapture 的 FOV
 	float ViewportFOV = Fov;
-	if (USceneCaptureComponent2D* Comp = SceneCapture->GetCaptureComponent2D())
+	if (USceneCaptureComponent2D* Comp = m_SceneCapture->GetCaptureComponent2D())
 	{
 		ViewportFOV = Comp->FOVAngle;
 	}
 
 	const float HalfFOVRad = FMath::DegreesToRadians(ViewportFOV) * 0.5f;
-	const float RTAspect = static_cast<float>(ScenePreviewRT->SizeX) / static_cast<float>(ScenePreviewRT->SizeY);
+	const float RTAspect = static_cast<float>(m_ScenePreviewRT->SizeX) / static_cast<float>(m_ScenePreviewRT->SizeY);
 
 	// UE 的 FOVAngle 是水平 FOV
 	const float TanHalfFOVH = FMath::Tan(HalfFOVRad);
@@ -944,12 +1283,12 @@ FReply SPnPToolWidget::OnSceneMouseDown(const FGeometry& MyGeometry, const FPoin
 	const FVector RayDirLocal(1.0f, ScreenX * TanHalfFOVH, ScreenY * TanHalfFOVV);
 
 	// 转世界方向
-	const FVector CamPos = SceneCapture->GetActorLocation();
-	const FRotator CamRot = SceneCapture->GetActorRotation();
+	const FVector CamPos = m_SceneCapture->GetActorLocation();
+	const FRotator CamRot = m_SceneCapture->GetActorRotation();
 	const FVector RayDirWorld = CamRot.RotateVector(RayDirLocal).GetSafeNormal();
 	const FVector RayEnd = CamPos + RayDirWorld * 10000.0f;
 
-	FCollisionQueryParams TraceParams(SCENE_QUERY_STAT(PnPRaycast), false, SceneCapture.Get());
+	FCollisionQueryParams TraceParams(SCENE_QUERY_STAT(PnPRaycast), false, m_SceneCapture.Get());
 	FHitResult HitResult;
 	const bool bHit = World->LineTraceSingleByChannel(HitResult, CamPos, RayEnd, ECC_Visibility, TraceParams);
 
@@ -957,36 +1296,63 @@ FReply SPnPToolWidget::OnSceneMouseDown(const FGeometry& MyGeometry, const FPoin
 	{
 		const FVector HitPoint = HitResult.ImpactPoint;
 
-		// 主流程：有 SourceCapture → 自动投影生成配对
-		if (SourceCapture.IsValid())
+		if (ActivePairIndex != INDEX_NONE && ManualObjectPoints.IsValidIndex(ActivePairIndex))
 		{
-			const FVector2D ProjUV = ProjectWorldToImage(HitPoint);
-			ManualObjectPoints.Add(HitPoint);
-			ManualImagePoints.Add(ProjUV);
-			ActivePairIndex = ManualObjectPoints.Num() - 1;
-
-			if (ProjUV.X >= 0.0 && ProjUV.Y >= 0.0)
-			{
-				LogMessage(FString::Printf(TEXT("[配对 #%d] 3D(%.1f, %.1f, %.1f) <-> 2D(%.1f, %.1f) [自动投影] 可在右侧 RT 点击微调"),
-					ActivePairIndex, HitPoint.X, HitPoint.Y, HitPoint.Z, ProjUV.X, ProjUV.Y));
-			}
-			else
-			{
-				LogMessage(FString::Printf(TEXT("[配对 #%d] 3D(%.1f, %.1f, %.1f) 自动投影失败(点在相机后方)，请手动点击 RT 或在列表修改 2D 坐标"),
-					ActivePairIndex, HitPoint.X, HitPoint.Y, HitPoint.Z));
-			}
-			RebuildPairsList();
-			UpdateRTMarkerOverlay();
-			DrawManualMarkers();
+			// 编辑已提交 pair 的 3D 点
+			ManualObjectPoints[ActivePairIndex] = HitPoint;
+			DestroyMarkerActor(ActivePairIndex);
+			CreateMarkerActor(ActivePairIndex);
+			UpdatePairRowValues(ActivePairIndex);
+			LogMessage(FString::Printf(TEXT("[编辑] 配对 #%d 的 3D 点已更新为 (%.1f, %.1f, %.1f)"),
+				ActivePairIndex, HitPoint.X, HitPoint.Y, HitPoint.Z));
 		}
 		else
 		{
-			// 回退流程：无 SourceCapture，存为待配对点，等右侧点击
-			PendingObjectPoint = HitPoint;
-			LogMessage(FString::Printf(TEXT("[3D点] 已选择 (红色, 待配对): (%.1f, %.1f, %.1f) - 请在右侧 RT 点击对应 2D 点"),
+			// 新建 pair 的 3D 点
+			Pending3DPoint = HitPoint;
+
+			// 创建/更新 Pending Marker
+			if (PendingMarker.IsValid())
+			{
+				PendingMarker->SetActorLocation(HitPoint);
+			}
+			else
+			{
+				// 创建新的 Pending Marker（内联创建，不存入 MarkerActors）
+				static UStaticMesh* SphereMesh = nullptr;
+				if (!SphereMesh)
+				{
+					SphereMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Sphere"));
+				}
+				if (SphereMesh)
+				{
+					FActorSpawnParameters Params;
+					Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+					AStaticMeshActor* Marker = World->SpawnActor<AStaticMeshActor>(HitPoint, FRotator::ZeroRotator, Params);
+					if (Marker)
+					{
+						if (UStaticMeshComponent* MeshComp = Marker->GetStaticMeshComponent())
+						{
+							MeshComp->SetStaticMesh(SphereMesh);
+							MeshComp->SetWorldScale3D(FVector(0.2f));
+							MeshComp->SetMobility(EComponentMobility::Movable);
+							MeshComp->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+							MeshComp->SetCollisionResponseToAllChannels(ECR_Ignore);
+							MeshComp->SetCastShadow(false);
+						}
+						Marker->SetActorLabel(TEXT("PnP Pending"));
+						Marker->SetFlags(RF_Transient);
+						PendingMarker = Marker;
+					}
+				}
+			}
+
+			LogMessage(FString::Printf(TEXT("[输入] 3D 点已设置: (%.1f, %.1f, %.1f) | 可继续点击或拖 Gizmo 调整；完成后点'添加2D点'"),
 				HitPoint.X, HitPoint.Y, HitPoint.Z));
-			DrawManualMarkers();
 		}
+
+		UpdateInputModeUI();
+		DrawManualMarkers();
 	}
 
 	return FReply::Handled();
@@ -995,12 +1361,12 @@ FReply SPnPToolWidget::OnSceneMouseDown(const FGeometry& MyGeometry, const FPoin
 FReply SPnPToolWidget::OnRTMouseDown(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent)
 {
 	if (MouseEvent.GetEffectingButton() != EKeys::LeftMouseButton) return FReply::Handled();
-	if (!DisplayRT.IsValid()) return FReply::Handled();
+	if (!m_DisplayRT.IsValid()) return FReply::Handled();
 
-	// 无活动配对且无待配对点 → 提示先选 3D
-	if (!PendingObjectPoint.IsSet() && !ManualImagePoints.IsValidIndex(ActivePairIndex))
+	// 只有 Edit2D 模式才处理 RT 点击
+	if (InputMode != EInputMode::Edit2D)
 	{
-		LogMessage(TEXT("[警告] 请先在左侧场景视口点击选择 3D 点"));
+		LogMessage(TEXT("[提示] 请先点'添加2D点'按钮进入 2D 点输入模式"));
 		return FReply::Handled();
 	}
 
@@ -1017,32 +1383,26 @@ FReply SPnPToolWidget::OnRTMouseDown(const FGeometry& MyGeometry, const FPointer
 	}
 
 	// UV 转像素坐标（使用 DisplayRT，即实际显示的 RT 尺寸）
-	const float Px = UVPos.X * DisplayRT->SizeX;
-	const float Py = UVPos.Y * DisplayRT->SizeY;
+	const float Px = UVPos.X * m_DisplayRT->SizeX;
+	const float Py = UVPos.Y * m_DisplayRT->SizeY;
 
-	// 优先处理回退流程：有待配对的 3D 点 → 完成新配对
-	if (PendingObjectPoint.IsSet())
+	if (ActivePairIndex != INDEX_NONE && ManualImagePoints.IsValidIndex(ActivePairIndex))
 	{
-		ManualObjectPoints.Add(PendingObjectPoint.GetValue());
-		ManualImagePoints.Add(FVector2D(Px, Py));
-		ActivePairIndex = ManualObjectPoints.Num() - 1;
-		PendingObjectPoint.Reset();
-
-		LogMessage(FString::Printf(TEXT("[配对 #%d] 3D(%.1f, %.1f, %.1f) <-> 2D(%.1f, %.1f) [手动点击]"),
-			ActivePairIndex,
-			ManualObjectPoints[ActivePairIndex].X, ManualObjectPoints[ActivePairIndex].Y, ManualObjectPoints[ActivePairIndex].Z,
+		// 编辑已提交 pair 的 2D 点
+		ManualImagePoints[ActivePairIndex] = FVector2D(Px, Py);
+		UpdatePairRowValues(ActivePairIndex);
+		LogMessage(FString::Printf(TEXT("[编辑] 配对 #%d 的 2D 点已更新为 (%.1f, %.1f)"),
+			ActivePairIndex, Px, Py));
+	}
+	else
+	{
+		// 新建 pair 的 2D 点
+		Pending2DPoint = FVector2D(Px, Py);
+		LogMessage(FString::Printf(TEXT("[输入] 2D 点已设置: (%.1f, %.1f) | 可继续在 RT 点击调整；完成后点'添加3D点'提交并开始下一对"),
 			Px, Py));
 	}
-	else if (ManualImagePoints.IsValidIndex(ActivePairIndex))
-	{
-		// 主流程：覆盖当前活动配对的 2D 点（多次点击，最后一次生效）
-		const FVector& Obj = ManualObjectPoints[ActivePairIndex];
-		ManualImagePoints[ActivePairIndex] = FVector2D(Px, Py);
-		LogMessage(FString::Printf(TEXT("[配对 #%d] 2D 已更新为 (%.1f, %.1f) [覆盖] 3D(%.1f, %.1f, %.1f)"),
-			ActivePairIndex, Px, Py, Obj.X, Obj.Y, Obj.Z));
-	}
 
-	RebuildPairsList();
+	UpdateInputModeUI();
 	UpdateRTMarkerOverlay();
 	DrawManualMarkers();
 
@@ -1051,7 +1411,7 @@ FReply SPnPToolWidget::OnRTMouseDown(const FGeometry& MyGeometry, const FPointer
 
 void SPnPToolWidget::UpdateRTMarkerOverlay()
 {
-	if (!DisplayRT.IsValid())
+	if (!m_DisplayRT.IsValid())
 	{
 		RTMarkerBrush.DrawAs = ESlateBrushDrawType::NoDrawType;
 		if (RTOverlayImage.IsValid())
@@ -1061,8 +1421,8 @@ void SPnPToolWidget::UpdateRTMarkerOverlay()
 		return;
 	}
 
-	const int32 RTW = DisplayRT->SizeX;
-	const int32 RTH = DisplayRT->SizeY;
+	const int32 RTW = m_DisplayRT->SizeX;
+	const int32 RTH = m_DisplayRT->SizeY;
 	if (RTW <= 0 || RTH <= 0) return;
 
 	// 创建动态 Texture2D（用 CreateTransient 避免手动管理 PlatformData）
@@ -1093,18 +1453,37 @@ void SPnPToolWidget::UpdateRTMarkerOverlay()
 		Pixels[Idx + 3] = A;
 	};
 
-	// 画十字 + 中心圆；颜色由调用方传入（活动=黄色, 其余=绿色）
+	// 画十字 + 中心实心圆 + 外圈空心环；颜色由调用方传入（活动=黄色, 其余=绿色）
 	auto DrawPoint = [&](int32 X, int32 Y, uint8 R, uint8 G, uint8 B)
 	{
-		const int32 Size = 8;
+		// 长十字（半径 20px）
+		const int32 Size = 20;
 		for (int32 dx = -Size; dx <= Size; ++dx) SetPixel(X + dx, Y, R, G, B, 255);
 		for (int32 dy = -Size; dy <= Size; ++dy) SetPixel(X, Y + dy, R, G, B, 255);
-		const int32 Radius = 4;
-		for (int32 dx = -Radius; dx <= Radius; ++dx)
+
+		// 中心实心圆（半径 6px）
+		const int32 CoreRadius = 6;
+		for (int32 dx = -CoreRadius; dx <= CoreRadius; ++dx)
 		{
-			for (int32 dy = -Radius; dy <= Radius; ++dy)
+			for (int32 dy = -CoreRadius; dy <= CoreRadius; ++dy)
 			{
-				if (dx * dx + dy * dy <= Radius * Radius)
+				if (dx * dx + dy * dy <= CoreRadius * CoreRadius)
+				{
+					SetPixel(X + dx, Y + dy, R, G, B, 255);
+				}
+			}
+		}
+
+		// 外圈空心环（半径 14px，2px 厚），便于在复杂背景下定位
+		const int32 RingRadius = 14;
+		const int32 RingThickness = 2;
+		for (int32 dx = -RingRadius - RingThickness; dx <= RingRadius + RingThickness; ++dx)
+		{
+			for (int32 dy = -RingRadius - RingThickness; dy <= RingRadius + RingThickness; ++dy)
+			{
+				const int32 DistSq = dx * dx + dy * dy;
+				if (DistSq >= (RingRadius - RingThickness) * (RingRadius - RingThickness) &&
+					DistSq <= (RingRadius + RingThickness) * (RingRadius + RingThickness))
 				{
 					SetPixel(X + dx, Y + dy, R, G, B, 255);
 				}
@@ -1115,14 +1494,21 @@ void SPnPToolWidget::UpdateRTMarkerOverlay()
 	for (int32 i = 0; i < ManualImagePoints.Num(); ++i)
 	{
 		const FVector2D& Pt = ManualImagePoints[i];
-		if (i == ActivePairIndex)
+		if (i == ActivePairIndex && (InputMode == EInputMode::Edit2D))
 		{
-			DrawPoint(FMath::RoundToInt(Pt.X), FMath::RoundToInt(Pt.Y), 255, 255, 0); // 黄=活动
+			DrawPoint(FMath::RoundToInt(Pt.X), FMath::RoundToInt(Pt.Y), 255, 255, 0); // 黄=编辑中
 		}
 		else
 		{
 			DrawPoint(FMath::RoundToInt(Pt.X), FMath::RoundToInt(Pt.Y), 0, 255, 0);   // 绿=普通
 		}
+	}
+
+	// Pending 2D 点（新建 pair 的 2D 点，未提交）：红色显示
+	if (Pending2DPoint.IsSet())
+	{
+		const FVector2D& Pt = Pending2DPoint.GetValue();
+		DrawPoint(FMath::RoundToInt(Pt.X), FMath::RoundToInt(Pt.Y), 255, 0, 0); // 红=Pending
 	}
 
 	void* TextureData = Mip.BulkData.Lock(LOCK_READ_WRITE);
@@ -1149,8 +1535,10 @@ FReply SPnPToolWidget::OnClearMarkersClicked()
 {
 	ManualImagePoints.Empty();
 	ManualObjectPoints.Empty();
-	PendingObjectPoint.Reset();
 	ActivePairIndex = INDEX_NONE;
+	InputMode = EInputMode::Idle;
+	CancelPendingEdit();
+	DestroyAllMarkerActors();
 
 	RTMarkerBrush.DrawAs = ESlateBrushDrawType::NoDrawType;
 	if (RTOverlayImage.IsValid())
@@ -1167,8 +1555,233 @@ FReply SPnPToolWidget::OnClearMarkersClicked()
 	}
 
 	RebuildPairsList();
-	LogMessage(TEXT("[清除] 已清空所有标记点和待配对点"));
+	UpdateInputModeUI();
+	LogMessage(TEXT("[清除] 已清空所有标记点和待编辑点"));
 	return FReply::Handled();
+}
+
+// === 输入模式控制 ===
+
+void SPnPToolWidget::CommitPendingPair()
+{
+	// 提交当前 Pending pair 到已提交列表（要求 3D 和 2D 都已设置）
+	if (!Pending3DPoint.IsSet() || !Pending2DPoint.IsSet())
+	{
+		return;
+	}
+
+	ManualObjectPoints.Add(Pending3DPoint.GetValue());
+	ManualImagePoints.Add(Pending2DPoint.GetValue());
+
+	// 把 Pending Marker 转移到 MarkerActors 数组
+	if (PendingMarker.IsValid())
+	{
+		MarkerActors.Add(PendingMarker.Get());
+		PendingMarker = nullptr;
+	}
+
+	LogMessage(FString::Printf(TEXT("[提交] 配对 #%d: 3D(%.1f, %.1f, %.1f) <-> 2D(%.1f, %.1f)"),
+		ManualObjectPoints.Num() - 1,
+		Pending3DPoint.GetValue().X, Pending3DPoint.GetValue().Y, Pending3DPoint.GetValue().Z,
+		Pending2DPoint.GetValue().X, Pending2DPoint.GetValue().Y));
+
+	Pending3DPoint.Reset();
+	Pending2DPoint.Reset();
+	PendingMarker = nullptr;
+}
+
+void SPnPToolWidget::CancelPendingEdit()
+{
+	// 销毁 Pending Marker（未提交的 3D 点可视化）
+	if (PendingMarker.IsValid())
+	{
+		if (UWorld* World = PendingMarker->GetWorld())
+		{
+			World->DestroyActor(PendingMarker.Get(), false);
+		}
+		PendingMarker = nullptr;
+	}
+	Pending3DPoint.Reset();
+	Pending2DPoint.Reset();
+}
+
+FReply SPnPToolWidget::OnAdd3DPointClicked()
+{
+	// 如果正在编辑已提交 pair（ActivePairIndex 有效），先退出编辑模式
+	if (ActivePairIndex != INDEX_NONE)
+	{
+		ActivePairIndex = INDEX_NONE;
+		LogMessage(TEXT("[编辑] 已退出已提交 pair 的编辑模式"));
+	}
+
+	// 如果当前 Pending pair 完整（3D + 2D 都有），先提交
+	if (Pending3DPoint.IsSet() && Pending2DPoint.IsSet())
+	{
+		CommitPendingPair();
+		RebuildPairsList();
+	}
+
+	// 进入 3D 点输入模式（开始新 pair）
+	InputMode = EInputMode::Edit3D;
+	UpdateInputModeUI();
+	DrawManualMarkers();
+	UpdateRTMarkerOverlay();
+
+	if (Pending3DPoint.IsSet())
+	{
+		LogMessage(FString::Printf(TEXT("[输入] 3D 点输入模式 | 当前 3D(%.1f, %.1f, %.1f) 可在 3D 视口点击或拖 Gizmo 调整"),
+			Pending3DPoint.GetValue().X, Pending3DPoint.GetValue().Y, Pending3DPoint.GetValue().Z));
+	}
+	else
+	{
+		LogMessage(TEXT("[输入] 3D 点输入模式 | 请在左侧场景视口点击放置 3D 点"));
+	}
+	return FReply::Handled();
+}
+
+FReply SPnPToolWidget::OnAdd2DPointClicked()
+{
+	// 编辑已提交 pair 的 2D 点
+	if (ActivePairIndex != INDEX_NONE)
+	{
+		InputMode = EInputMode::Edit2D;
+		UpdateInputModeUI();
+		LogMessage(FString::Printf(TEXT("[输入] 2D 点输入模式 | 编辑配对 #%d 的 2D 点，请在右侧 RT 点击"),
+			ActivePairIndex));
+		return FReply::Handled();
+	}
+
+	// 新建 pair：要求 3D 点已设置
+	if (!Pending3DPoint.IsSet())
+	{
+		LogMessage(TEXT("[警告] 请先点'添加3D点'并在 3D 视口点击放置 3D 点"));
+		return FReply::Handled();
+	}
+
+	// 如果有 3D 点但还没有 2D 点，自动投影生成默认精准 2D 点
+	if (!Pending2DPoint.IsSet())
+	{
+		FVector2D Default2D = ProjectWorldToImage(Pending3DPoint.GetValue());
+		Pending2DPoint = Default2D;
+		LogMessage(FString::Printf(TEXT("[自动] 已根据 3D 点投影生成默认 2D 点: (%.1f, %.1f)，可在右侧 RT 点击调整"),
+			Default2D.X, Default2D.Y));
+	}
+
+	InputMode = EInputMode::Edit2D;
+	UpdateInputModeUI();
+
+	if (Pending2DPoint.IsSet())
+	{
+		LogMessage(FString::Printf(TEXT("[输入] 2D 点输入模式 | 当前 2D(%.1f, %.1f) 可在右侧 RT 点击调整"),
+			Pending2DPoint.GetValue().X, Pending2DPoint.GetValue().Y));
+	}
+	else
+	{
+		LogMessage(TEXT("[输入] 2D 点输入模式 | 请在右侧 RT 点击放置 2D 点"));
+	}
+	return FReply::Handled();
+}
+
+FReply SPnPToolWidget::OnCancelEditClicked()
+{
+	// 如果在编辑已提交 pair，只是退出编辑模式
+	if (ActivePairIndex != INDEX_NONE)
+	{
+		ActivePairIndex = INDEX_NONE;
+		InputMode = EInputMode::Idle;
+		UpdateInputModeUI();
+		DrawManualMarkers();
+		UpdateRTMarkerOverlay();
+		LogMessage(TEXT("[取消] 已退出已提交 pair 的编辑模式"));
+		return FReply::Handled();
+	}
+
+	// 新建 pair 的取消：销毁 Pending Marker，清空数据
+	CancelPendingEdit();
+	InputMode = EInputMode::Idle;
+	UpdateInputModeUI();
+	DrawManualMarkers();
+	UpdateRTMarkerOverlay();
+	LogMessage(TEXT("[取消] 已取消当前 pair 的编辑"));
+	return FReply::Handled();
+}
+
+void SPnPToolWidget::UpdateInputModeUI()
+{
+	// 更新按钮文字
+	if (Add3DBtnText.IsValid())
+	{
+		if (InputMode == EInputMode::Edit3D)
+		{
+			Add3DBtnText->SetText(FText::FromString(TEXT("●3D输入中")));
+		}
+		else if (Pending3DPoint.IsSet() && Pending2DPoint.IsSet())
+		{
+			Add3DBtnText->SetText(FText::FromString(TEXT("添加3D点(提交)")));
+		}
+		else
+		{
+			Add3DBtnText->SetText(FText::FromString(TEXT("添加3D点")));
+		}
+	}
+
+	if (Add2DBtnText.IsValid())
+	{
+		if (InputMode == EInputMode::Edit2D)
+		{
+			Add2DBtnText->SetText(FText::FromString(TEXT("●2D输入中")));
+		}
+		else
+		{
+			Add2DBtnText->SetText(FText::FromString(TEXT("添加2D点")));
+		}
+	}
+
+	// 更新状态文字
+	if (CurrentStateText.IsValid())
+	{
+		FString StateText;
+		if (InputMode == EInputMode::Idle)
+		{
+			StateText = TEXT("状态：空闲");
+		}
+		else if (InputMode == EInputMode::Edit3D)
+		{
+			if (ActivePairIndex != INDEX_NONE)
+			{
+				StateText = FString::Printf(TEXT("状态：编辑配对 #%d 的 3D 点"), ActivePairIndex);
+			}
+			else if (Pending3DPoint.IsSet())
+			{
+				StateText = FString::Printf(TEXT("状态：3D输入中 (%.1f, %.1f, %.1f)"),
+					Pending3DPoint.GetValue().X, Pending3DPoint.GetValue().Y, Pending3DPoint.GetValue().Z);
+			}
+			else
+			{
+				StateText = TEXT("状态：3D输入中（待点击）");
+			}
+		}
+		else if (InputMode == EInputMode::Edit2D)
+		{
+			if (ActivePairIndex != INDEX_NONE)
+			{
+				StateText = FString::Printf(TEXT("状态：编辑配对 #%d 的 2D 点"), ActivePairIndex);
+			}
+			else if (Pending2DPoint.IsSet())
+			{
+				StateText = FString::Printf(TEXT("状态：2D输入中 (%.1f, %.1f)"),
+					Pending2DPoint.GetValue().X, Pending2DPoint.GetValue().Y);
+			}
+			else
+			{
+				StateText = TEXT("状态：2D输入中（待点击）");
+			}
+		}
+		CurrentStateText->SetText(FText::FromString(StateText));
+	}
+
+	// 更新配对列表行视觉
+	UpdateActiveRowVisuals();
 }
 
 void SPnPToolWidget::LogMessage(const FString& Msg)
@@ -1230,6 +1843,14 @@ FReply SPnPToolWidget::OnSolveClicked()
 		return FReply::Handled();
 	}
 
+	// 如果有未提交的 Pending pair，提示先提交
+	if (Pending3DPoint.IsSet() || Pending2DPoint.IsSet())
+	{
+		LogMessage(TEXT("[警告] 当前有未提交的 pair（3D 或 2D 点未完成），请点'添加3D点'提交后再求解"));
+		bLastSolveSuccess = false;
+		return FReply::Handled();
+	}
+
 	// 设置内参
 	ApplyIntrinsicsToSolver(Solver);
 
@@ -1249,19 +1870,19 @@ FReply SPnPToolWidget::OnSolveClicked()
 	}
 
 	// 设置 Ground Truth（如果有 SourceCapture）
-	if (SourceCapture.IsValid())
+	if (m_SourceCapture.IsValid())
 	{
-		Solver->m_GroundTruthPose = SourceCapture->GetActorTransform();
+		Solver->m_GroundTruthPose = m_SourceCapture->GetActorTransform();
 	}
 
 	// === GroundTruth 投影验证 ===
 	// 用 SourceCapture 的真实位姿 + 内参，把每个 3D 点投影到 2D，与用户点击的 2D 点对比。
 	// 若两者差距大 → 配对/内参/右侧画面不一致有问题（求解器无辜）。
 	// 若两者接近  → 配对正确，问题在求解器本身或点分布。
-	if (SourceCapture.IsValid())
+	if (m_SourceCapture.IsValid())
 	{
-		const FVector CamLoc = SourceCapture->GetActorLocation();
-		const FRotator CamRot = SourceCapture->GetActorRotation();
+		const FVector CamLoc = m_SourceCapture->GetActorLocation();
+		const FRotator CamRot = m_SourceCapture->GetActorRotation();
 		double TotalGtErr = 0.0;
 		double MaxGtErr = 0.0;
 		LogMessage(TEXT("[GT验证] 用 SourceCapture 真实位姿投影 3D 点，对比用户 2D 点:"));

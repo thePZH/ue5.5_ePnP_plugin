@@ -34,20 +34,8 @@ class PNPTOOL_API UPnPSolverSubsystem : public UWorldSubsystem
 	GENERATED_BODY()
 
 public:
-	//~ UWorldSubsystem interface
 	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
 	virtual void Deinitialize() override;
-	//~ End
-
-	/** 一键执行完整流程：获取内参 → 射线投射 → PnP 求解 → 自动计算重投影误差 */
-	UFUNCTION(BlueprintCallable, Category = "PnP|Actions", meta = (DisplayName = "Run Full Pipeline"))
-	void RunFullPipeline();
-
-	UFUNCTION(BlueprintCallable, Category = "PnP|Actions", meta = (DisplayName = "Get Intrinsics from Camera"))
-	void GetIntrinsicsFromCamera();
-
-	UFUNCTION(BlueprintCallable, Category = "PnP|Actions", meta = (DisplayName = "Raycast Grid to 3D Points"))
-	void GeneratePointsByRaycast();
 
 	UFUNCTION(BlueprintCallable, Category = "PnP|Actions", meta = (DisplayName = "Solve PnP"))
 	void SolvePnP();
@@ -55,16 +43,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "PnP|Actions", meta = (DisplayName = "Compare Solved vs Ground Truth"))
 	void CompareSolvedVsGroundTruth();
 
-	UFUNCTION(BlueprintCallable, Category = "PnP|Actions", meta = (DisplayName = "Clear All Points"))
-	void ClearAllPoints();
-
 	/** 计算重投影误差（已在 SolvePnP 后自动调用，无需手动点击） */
 	UFUNCTION(BlueprintCallable, Category = "PnP|Actions", meta = (DisplayName = "Compute Reprojection Error"))
 	void ComputeReprojectionError();
-
-	/** 添加一对 3D-2D 点 */
-	UFUNCTION(BlueprintCallable, Category = "PnP|Inputs")
-	void AddPointPair(FVector ObjectPoint, FVector2D ImagePoint);
 
 	/** 要获取内参的相机 Actor（CameraActor 或 SceneCapture2D） */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PnP|Inputs|Camera", meta = (DisplayName = "Source Camera Actor"))
@@ -73,22 +54,6 @@ public:
 	/** 图像分辨率（像素），如 1920x1080 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PnP|Inputs|Camera", meta = (DisplayName = "Image Resolution (px)"))
 	FIntPoint m_ImageResolution = FIntPoint(1920, 1080);
-
-	/** 射线最大长度（cm） */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PnP|Inputs|Raycast", meta = (DisplayName = "Raycast Max Distance (cm)"))
-	float m_RaycastMaxDistance = 10000.0f;
-
-	/** 射线投射通道（默认可见通道） */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PnP|Inputs|Raycast", meta = (DisplayName = "Raycast Channel"))
-	TEnumAsByte<ECollisionChannel> m_RaycastChannel = ECC_Visibility;
-
-	/** 网格行数（总点数 = (Rows+1)*(Cols+1)） */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PnP|Inputs|Raycast", meta = (DisplayName = "Grid Rows"))
-	int32 m_GridRows = 1;
-
-	/** 网格列数 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PnP|Inputs|Raycast", meta = (DisplayName = "Grid Cols"))
-	int32 m_GridCols = 1;
 
 	/** 3D 物体点（UE 世界坐标系） */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PnP|Inputs", meta = (DisplayName = "3D Object Points (UE)"))
@@ -137,10 +102,6 @@ public:
 	/** 旋转误差（度） */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "PnP|Output", meta = (DisplayName = "Rotation Error (deg)"))
 	double m_RotationError = -1.0;
-
-#if WITH_EDITOR
-	void DrawEditorDebug();
-#endif
 
 private:
 	/** Cached rvec/tvec from cv::solvePnP for direct reprojection */

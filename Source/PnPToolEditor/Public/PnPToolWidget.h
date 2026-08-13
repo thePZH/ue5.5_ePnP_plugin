@@ -61,6 +61,9 @@ private:
 	FString GetSourceCapturePath() const;
 	void    OnSourceCaptureChanged(const FAssetData& InAssetData);
 	FReply  OnGetIntrinsicsClicked();
+	// 依据当前 SourceCapture 的 FOV 与 TextureTarget 尺寸重算内参，
+	// 保证 Resolution/Fx/Fy/Cx/Cy 与 m_DisplayRT 像素空间一致
+	void    RecomputeIntrinsicsFromSource();
 
 	const FSlateBrush* GetSceneBrush() const { return &m_SceneBrush; }
 	const FSlateBrush* GetRTBrush() const { return &RTBrush; }

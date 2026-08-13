@@ -504,6 +504,10 @@ void SPnPToolWidget::OnSourceCaptureChanged(const FAssetData& InAssetData)
 			if (UTextureRenderTarget2D* SrcRT = Comp->TextureTarget)
 			{
 				ResizeDisplayRT(SrcRT->SizeX, SrcRT->SizeY);
+				// 同步内参，保证 ProjectWorldToImage 输出空间 == m_DisplayRT 像素空间
+				RecomputeIntrinsicsFromSource();
+				LogMessage(FString::Printf(TEXT("[内参] 已随源采集器同步: fx=%.2f fy=%.2f cx=%.2f cy=%.2f Res=%dx%d FOV=%.2f"),
+					Fx, Fy, Cx, Cy, Resolution.X, Resolution.Y, Fov));
 			}
 			else
 			{
@@ -511,6 +515,28 @@ void SPnPToolWidget::OnSourceCaptureChanged(const FAssetData& InAssetData)
 			}
 		}
 	}
+}
+
+void SPnPToolWidget::RecomputeIntrinsicsFromSource()
+{
+	if (!m_SourceCapture.IsValid()) return;
+	USceneCaptureComponent2D* Comp = m_SourceCapture->GetCaptureComponent2D();
+	if (!Comp || !Comp->TextureTarget) return;
+
+	UTextureRenderTarget2D* RT = Comp->TextureTarget;
+	const int32 W = RT->SizeX;
+	const int32 H = RT->SizeY;
+	const float FOV = Comp->FOVAngle;
+
+	const float HalfFOVRad = FMath::DegreesToRadians(FOV) * 0.5f;
+	const float Focal = (W * 0.5f) / FMath::Tan(HalfFOVRad);
+
+	Fx = Focal;
+	Fy = Focal;
+	Cx = W * 0.5f;
+	Cy = H * 0.5f;
+	Fov = FOV;
+	Resolution = FIntPoint(W, H);
 }
 
 FReply SPnPToolWidget::OnGetIntrinsicsClicked()
@@ -528,23 +554,10 @@ FReply SPnPToolWidget::OnGetIntrinsicsClicked()
 		return FReply::Handled();
 	}
 
-	UTextureRenderTarget2D* RT = Comp->TextureTarget;
-	const int32 W = RT->SizeX;
-	const int32 H = RT->SizeY;
-	const float FOV = Comp->FOVAngle;
-
-	const float HalfFOVRad = FMath::DegreesToRadians(FOV) * 0.5f;
-	const float Focal = (W * 0.5f) / FMath::Tan(HalfFOVRad);
-
-	Fx = Focal;
-	Fy = Focal;
-	Cx = W * 0.5f;
-	Cy = H * 0.5f;
-	Fov = FOV;
-	Resolution = FIntPoint(W, H);
+	RecomputeIntrinsicsFromSource();
 
 	LogMessage(FString::Printf(TEXT("[内参] fx=%.2f fy=%.2f cx=%.2f cy=%.2f Res=%dx%d FOV=%.2f"),
-		Fx, Fy, Cx, Cy, W, H, FOV));
+		Fx, Fy, Cx, Cy, Resolution.X, Resolution.Y, Fov));
 
 	return FReply::Handled();
 }
@@ -695,6 +708,8 @@ void SPnPToolWidget::Tick(const FGeometry& AllottedGeometry, const double InCurr
 				if (m_DisplayRT->SizeX != SrcRT->SizeX || m_DisplayRT->SizeY != SrcRT->SizeY)
 				{
 					ResizeDisplayRT(SrcRT->SizeX, SrcRT->SizeY);
+					// 尺寸变化时同步内参，避免投影空间与显示空间错位
+					RecomputeIntrinsicsFromSource();
 				}
 			}
 		}
@@ -1474,7 +1489,7 @@ void SPnPToolWidget::UpdateRTMarkerOverlay()
 			}
 		}
 
-		// 外圈空心环（半径 14px，2px 厚），便于在复杂背景下定位
+		// 外圈空心环（半径 14px，1px 厚），便于在复杂背景下定位
 		const int32 RingRadius = 14;
 		const int32 RingThickness = 2;
 		for (int32 dx = -RingRadius - RingThickness; dx <= RingRadius + RingThickness; ++dx)

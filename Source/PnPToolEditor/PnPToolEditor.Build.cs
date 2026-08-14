@@ -33,9 +33,10 @@ public class PnPToolEditor : ModuleRules
 				"AssetRegistry",
 				"ContentBrowser",
 				"ToolMenus",
-				"PnPTool",
-				"OpenCVHelper",
-				"OpenCV",
+			"PnPTool",
+			"OpenCVHelper",
+			"OpenCV",
+			"AppFramework",
 			}
 		);
 	}

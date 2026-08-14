@@ -9,18 +9,51 @@
 #include "Engine/EngineTypes.h"
 
 class UTextureRenderTarget2D;
+class UTexture2D;
 class ASceneCapture2D;
 class UPnPSolverSubsystem;
+class AActor;
+class SCanvas;
+class SImage;
+class SBox;
+class SBorder;
+class SVerticalBox;
+class STextBlock;
+class SScrollBox;
+struct FAssetData;
+struct FPointerEvent;
 
+/**
+ * PnP 标定工具主控件。
+ *
+ * 设计：
+ * - 左侧：场景预览视口（插件内部 SceneCapture2D 渲染）。求解成功后应用外参并把目标纹理半透明叠加，
+ *   供用户肉眼对比图像与场景是否对齐。不处理任何鼠标事件。
+ * - 右侧：目标纹理视口（用户传入 UTexture2D）。支持滚轮缩放、右键/Shift+Ctrl+滚轮平移、
+ *   编辑2D模式下左键按下拖动精确定点。内参完全由用户手动输入（工具不感知任何 SceneCapture2D）。
+ * - 3D 点：用户在编辑器主视口拖入预制球体 Actor，全选后点「添加3D点」读取选中 Actor，实时跟随移动。
+ * - 每个 pair(3D,2D) 共享一个颜色，用户可调。
+ */
 class SPnPToolWidget : public SCompoundWidget
 {
 public:
-	/** 输入模式：决定当前视口点击作用于 3D 点还是 2D 点 */
+	/** 输入模式 */
 	enum class EInputMode : uint8
 	{
-		Idle,    // 空闲：视口点击无效果
-		Edit3D,  // 编辑 3D 点：3D 视口点击 / Gizmo 拖动修改当前 pair 的 3D 点
-		Edit2D,  // 编辑 2D 点：RT 点击修改当前 pair 的 2D 点
+		Idle,    // 空闲
+		Edit2D,  // 编辑某个 pair 的 2D 点（在右侧纹理视口点击/拖动）
+	};
+
+	/** 一组 3D-2D 配对 */
+	struct FPair
+	{
+		int32 Id = 0;                       // 自增唯一 id
+		FLinearColor Color = FLinearColor::White;
+		FString DisplayName;                // Actor 名字
+		TWeakObjectPtr<AActor> SourceActor; // 拖入的球体 Actor（3D 点实时跟随它）
+		FVector Point3D = FVector::ZeroVector;
+		FVector2D Point2D = FVector2D::ZeroVector; // 目标纹理像素坐标
+		bool bHas2D = false;
 	};
 
 	SLATE_BEGIN_ARGS(SPnPToolWidget) {}
@@ -29,170 +62,155 @@ public:
 	void Construct(const FArguments& InArgs);
 	virtual ~SPnPToolWidget() override;
 	virtual void Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime) override;
-	FOptionalSize GetSceneAspectRatio() const;
-	FOptionalSize GetRTAspectRatio() const;
-	void DrawManualMarkers();
-private:
-	void EnsureSceneCapture();
-	void EnsureRightSceneCapture();
-	void UpdateSceneCaptureFromActiveViewport() const;
-	void ResizeDisplayRT(int32 NewW, int32 NewH);
+	virtual FReply OnMouseWheel(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override;
 
+private:
 	TSharedRef<SWidget> BuildInputPanel();
+	TSharedRef<SWidget> BuildScenePreviewPanel();
 	TSharedRef<SWidget> BuildRTPreviewPanel();
 	TSharedRef<SWidget> BuildResultsPanel();
 
-	// 内参 getter/setter
-	double GetFx() const { return Fx; }
-	void   SetFx(double V) { Fx = V; }
-	double GetFy() const { return Fy; }
-	void   SetFy(double V) { Fy = V; }
-	double GetCx() const { return Cx; }
-	void   SetCx(double V) { Cx = V; }
-	double GetCy() const { return Cy; }
-	void   SetCy(double V) { Cy = V; }
-	double GetFov() const { return Fov; }
-	void   SetFov(double V) { Fov = V; }
-	int32  GetResW() const { return Resolution.X; }
-	void   SetResW(int32 V) { Resolution.X = V; }
-	int32  GetResH() const { return Resolution.Y; }
-	void   SetResH(int32 V) { Resolution.Y = V; }
+	// 左侧预览 SceneCapture（插件内部）
+	void EnsureSceneCapture();
+	void UpdateLeftPreviewCapture();  // 锁定到求解位姿 / 否则跟随活动视口
+	void UpdateLeftOverlaySize();     // 半透明纹理叠加的尺寸 = 场景渲染 / PreviewFOVScale
+	FOptionalSize GetSceneAspectRatio() const;
+	FOptionalSize GetRTAspectRatio() const;
 
-	FString GetSourceCapturePath() const;
-	void    OnSourceCaptureChanged(const FAssetData& InAssetData);
-	FReply  OnGetIntrinsicsClicked();
-	// 依据当前 SourceCapture 的 FOV 与 TextureTarget 尺寸重算内参，
-	// 保证 Resolution/Fx/Fy/Cx/Cy 与 m_DisplayRT 像素空间一致
-	void    RecomputeIntrinsicsFromSource();
+	// 内参 getter/setter（手动输入）
+	double GetFx() const { return m_Fx; }
+	void   SetFx(double V) { m_Fx = V; }
+	double GetFy() const { return m_Fy; }
+	void   SetFy(double V) { m_Fy = V; }
+	double GetCx() const { return m_Cx; }
+	void   SetCx(double V) { m_Cx = V; }
+	double GetCy() const { return m_Cy; }
+	void   SetCy(double V) { m_Cy = V; }
+	int32  GetResW() const { return m_TargetTexRes.X; }
+	void   SetResW(int32 V) { m_TargetTexRes.X = V; }
+	int32  GetResH() const { return m_TargetTexRes.Y; }
+	void   SetResH(int32 V) { m_TargetTexRes.Y = V; }
+	double GetPreviewFOVScale() const { return m_PreviewFOVScale; }
+	void   SetPreviewFOVScale(double V) { m_PreviewFOVScale = V; }
+
+	// 内参辅助计算
+	double  GetHelperFOV() const { return m_HelperFOV; }
+	void    SetHelperFOV(double V) { m_HelperFOV = FMath::Clamp(V, 0.1, 179.9); }
+	FReply  OnApplyTexSizeClicked();    // 用目标纹理尺寸设置 Resolution / cx / cy
+	FReply  OnComputeFxFyFromFOVClicked(); // 用水平 FOV 计算 fx=fy（基于当前 Resolution）
+
+	// 目标纹理
+	FString GetTargetTexturePath() const;
+	void    OnTargetTextureChanged(const FAssetData& InAssetData);
 
 	const FSlateBrush* GetSceneBrush() const { return &m_SceneBrush; }
-	const FSlateBrush* GetRTBrush() const { return &RTBrush; }
+	const FSlateBrush* GetRTTextureBrush() const { return &m_TargetTextureBrush; }
+	const FSlateBrush* GetSceneOverlayBrush() const { return &m_SceneOverlayBrush; }
 
-	// 鼠标交互
-	FReply OnSceneMouseDown(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent);
-	FReply OnRTMouseDown(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent);
-	void   UpdateRTMarkerOverlay();
-	FReply OnClearMarkersClicked();
+	// 配对管理
+	FReply OnAdd3DPointClicked();            // 读取编辑器选中 Actor
+	FReply OnEdit2DClicked(int32 Index);     // 进入某 pair 的 2D 编辑
+	FReply OnDeletePairClicked(int32 Index);
+	FReply OnCancelEditClicked();
+	FReply OnClearAllClicked();
+	void   SetPairColor(int32 Id, FLinearColor NewColor);
+	void   OpenColorPickerForPair(int32 Index);
+	FLinearColor GetPaletteColor(int32 Index) const;
+	void   ApplyColorToActor(AActor* Actor, const FLinearColor& Color); // 通过材质参数修改 Actor 颜色
 
-	// 输入模式控制按钮
-	FReply OnAdd3DPointClicked();   // 开始/提交新 pair，进入 3D 点输入模式
-	FReply OnAdd2DPointClicked();   // 进入 2D 点输入模式
-	FReply OnCancelEditClicked();   // 取消当前编辑
-	void   CommitPendingPair();     // 提交当前 Pending pair 到已提交列表
-	void   CancelPendingEdit();     // 清空 Pending 状态（不提交）
-	void   UpdateInputModeUI();     // 更新按钮文字 / 状态显示 / 行视觉反映当前 InputMode
+	// 材质参数名
+	FName GetMaterialColorParamName() const { return m_MaterialColorParamName; }
+	void  SetMaterialColorParamName(const FText& InName);
 
-	// 3D 世界点 → 2D 像素投影（用 SourceCapture 位姿 + 当前内参）
-	// 返回 (U, V)；点在相机后方时返回 (-1, -1)
-	FVector2D ProjectWorldToImage(const FVector& WorldPoint) const;
-	// 重建右侧输入面板里的配对数组 UI（仅在增删配对时调用）
 	void RebuildPairsList();
-	// 原地更新指定行的 SpinBox 数值（拖动 Gizmo 时调用，不重建列表）
-	void UpdatePairRowValues(int32 Index);
-	// 更新所有行的活动状态视觉（边框高亮 + 按钮文字）
-	void UpdateActiveRowVisuals();
+	void RebuildRTMarkers();   // 重建右侧纹理视口的标记点 widget（结构变化时调用）
 
-	// 3D 标记 Actor 管理（用真实 Sphere Actor 替代 DebugSphere，支持 Gizmo 拖动编辑）
-	void CreateMarkerActor(int32 Index);          // 为 ManualObjectPoints[Index] 创建可视化 Actor
-	void DestroyMarkerActor(int32 Index);         // 销毁指定索引的 Actor
-	void DestroyAllMarkerActors();                // 销毁全部
-	void SyncMarkerActorsInTick();                // Tick 中检测 Actor 被拖动 → 同步到数据 + 重新投影 2D
+	// 右侧纹理视口交互
+	FReply OnRTMouseDown(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent);
+	FReply OnRTMouseMove(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent);
+	FReply OnRTMouseUp(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent);
+	void   ComputeRTTransform(const FVector2D& WidgetSize, float& OutScale, FVector2D& OutTotalOffset) const;
+	FVector2D ScreenToTexture(const FVector2D& ScreenPos, const FVector2D& WidgetSize) const;
+	FVector2D TextureToScreen(const FVector2D& TexPos, const FVector2D& WidgetSize) const;
+	FVector2D GetTextureSlotSize() const;
+	FVector2D GetTextureSlotPos() const;
+	FVector2D GetMarkerSize(int32 Index) const;
+	// 视觉像素坐标系统（Y=0=图像顶行，OpenCV 标准）
+	// 通过纹理槽位矩形将 Canvas 屏幕坐标 ↔ 视觉像素坐标互转
+	FVector2D ScreenToVisualPixel(const FVector2D& CanvasPos) const;
+	FVector2D VisualPixelToScreen(const FVector2D& VisPixel) const;
 
+	// 求解
 	FReply OnSolveClicked();
+	void DoSolve();   // 实际的求解逻辑，OnSolveClicked 和 Tick 都可调用
 	UPnPSolverSubsystem* GetSolverSubsystem() const;
 	void ApplyIntrinsicsToSolver(UPnPSolverSubsystem* Solver) const;
+	void ApplySolvedPoseToPreview();   // PnP 求解成功回调：把外参应用到左侧预览相机 + 叠加纹理
 
-	// 日志面板
+	// 日志
 	void LogMessage(const FString& Msg);
 	void UpdateMessages();
 
 private:
-	// 左侧场景预览
-	TWeakObjectPtr<UTextureRenderTarget2D> m_ScenePreviewRT;
-	TWeakObjectPtr<ASceneCapture2D> m_SceneCapture;
+	// 左侧验证窗口
+	TWeakObjectPtr<UTextureRenderTarget2D> m_DebugRT;
+	TWeakObjectPtr<ASceneCapture2D> m_DebugSceneCapture;
 	FSlateBrush m_SceneBrush;
 	TSharedPtr<SImage> m_SceneImageWidget;
 	TSharedPtr<SBox> m_SceneContainerBox;
+	TSharedPtr<SImage> m_SceneOverlayImage;
+	FSlateBrush m_SceneOverlayBrush;
+	TSharedPtr<SBox> m_SceneOverlayBox;
+	bool m_bPreviewPoseLocked = false;
 
-	// 右侧 RT 预览
-	// 显示用的中间 RT（使用 InitAutoFormat 创建，保证 Slate 兼容）
-	TWeakObjectPtr<UTextureRenderTarget2D> m_DisplayRT;
+	// 目标纹理 + 右侧视口
+	TWeakObjectPtr<UTexture2D> m_TargetTexture;
+	FSlateBrush m_TargetTextureBrush;
+	TSharedPtr<SBox> m_TargetContainerBox;
+	TSharedPtr<SBorder> m_TargetInteractionBorder;
+	TSharedPtr<SCanvas> m_TargetCanvas;
+	TSharedPtr<SImage> m_TargetTextureImage;
+	TArray<TSharedPtr<SWidget>> m_TargetMarkerWidgets; // 标记点 + 光标十字（与 Pairs 结构同步重建）
+	float m_TargetZoom = 1.0f;
+	FVector2D m_TargetPanOffset = FVector2D::ZeroVector;
+	bool m_bIsTargetDragging = false;
+	bool m_bIsTargetPanning = false;
+	FVector2D m_TargetPanStartMouse = FVector2D::ZeroVector;
+	FVector2D m_TargetPanStartOffset = FVector2D::ZeroVector;
+	bool m_bTargetShowCurCrosshair = false;
+	FVector2D m_TargetCursorScreenPos = FVector2D::ZeroVector;
 
-	// 右侧用于捕获并显示的 SceneCapture（由插件创建，位置跟随用户选定的 SourceCapture）
-	TWeakObjectPtr<ASceneCapture2D> m_RightSceneCapture;
+	// 配对数据
+	TArray<FPair> m_Pairs;
+	int32 m_NextPairId = 0;
+	int32 m_ActivePairIndex = INDEX_NONE;
+	EInputMode m_InputMode = EInputMode::Idle;
 
-	FSlateBrush RTBrush;
-	TSharedPtr<SImage> m_RTImageWidget;
-	TSharedPtr<SBox> m_RTContainerBox;
+	// 配对列表 UI 容器
+	TSharedPtr<SVerticalBox> m_PairsListContainer;
 
-	// 用户指定的源 SceneCapture2D（用于获取内参）
-	TWeakObjectPtr<ASceneCapture2D> m_SourceCapture;
+	// 日志
+	TArray<FString> m_Messages;
+	TSharedPtr<STextBlock> m_MessagesTextWidget;
+	TSharedPtr<SScrollBox> m_MessagesScrollBox;
 
-	// 2D 标记点 overlay
-	FSlateBrush RTMarkerBrush;
-	TSharedPtr<SImage> RTOverlayImage;
-	TArray<FVector2D> ManualImagePoints;     // 已提交的 2D 点
-	TArray<FVector> ManualObjectPoints;       // 已提交的 3D 点
-
-	// 当前活动配对索引：用于编辑已提交 pair
-	// - INDEX_NONE 表示正在新建 pair（数据存在 Pending3DPoint/Pending2DPoint）
-	// - 其他值表示正在编辑该索引的已提交 pair（数据直接在 ManualObjectPoints/ManualImagePoints 中）
-	int32 ActivePairIndex = INDEX_NONE;
-
-	// 输入模式：决定视口点击作用于 3D 点还是 2D 点
-	EInputMode InputMode = EInputMode::Idle;
-
-	// 新建 pair 时的临时数据（ActivePairIndex == INDEX_NONE 时使用）
-	TOptional<FVector> Pending3DPoint;
-	TOptional<FVector2D> Pending2DPoint;
-	TWeakObjectPtr<AActor> PendingMarker; // 新建 pair 的 3D 点 Marker（未提交）
-
-	// 输入模式按钮引用（用于动态显示当前模式状态）
-	TSharedPtr<STextBlock> Add3DBtnText;
-	TSharedPtr<STextBlock> Add2DBtnText;
-	TSharedPtr<STextBlock> CurrentStateText; // 显示当前编辑状态
-
-	// 3D 标记 Actor 数组（与 ManualObjectPoints 索引对齐）
-	// 用户可在编辑器视口选中 Actor 用 Gizmo 拖动，Tick 会自动同步位置到数据并重新投影 2D
-	TArray<TWeakObjectPtr<AActor>> MarkerActors;
-
-	// 右侧输入面板里的配对数组容器（每行：#i 3D(X,Y,Z) 2D(U,V) 删除 设活动）
-	TSharedPtr<SVerticalBox> PairsListContainer;
-
-	// 每行的 SpinBox 引用，用于拖动 Gizmo 时原地更新数值（避免重建列表导致闪烁）
-	struct FPairRowWidgets
-	{
-		TSharedPtr<SSpinBox<double>> Spin3DX;
-		TSharedPtr<SSpinBox<double>> Spin3DY;
-		TSharedPtr<SSpinBox<double>> Spin3DZ;
-		TSharedPtr<SSpinBox<double>> Spin2DU;
-		TSharedPtr<SSpinBox<double>> Spin2DV;
-		TSharedPtr<SBorder>          RowBorder;
-		TSharedPtr<SButton>          Edit3DBtn;   // 编辑该 pair 的 3D 点
-		TSharedPtr<STextBlock>       Edit3DBtnText;
-		TSharedPtr<SButton>          Edit2DBtn;   // 编辑该 pair 的 2D 点
-		TSharedPtr<STextBlock>       Edit2DBtnText;
-	};
-	TArray<FPairRowWidgets> PairRowWidgets;
-
-	// 日志面板
-	TArray<FString> Messages;
-	TSharedPtr<STextBlock> MessagesTextWidget;
-	TSharedPtr<SScrollBox> MessagesScrollBox;
-
-	// 内参
-	double Fx = 1720.54;
-	double Fy = 1720.54;
-	double Cx = 960.00;
-	double Cy = 540.00;
-	double Fov = 58.32;
-	FIntPoint Resolution = FIntPoint(1920, 1080);
+	// 内参（手动输入）
+	double m_Fx = 1000.0;
+	double m_Fy = 1000.0;
+	double m_Cx = 960.0;
+	double m_Cy = 540.0;
+	FIntPoint m_TargetTexRes = FIntPoint(1920, 1080);
+	double m_PreviewFOVScale = 1.0; // 左侧预览 FOV 倍率（>1 场景略大于纹理，便于判断对齐）
+	double m_HelperFOV = 90.0;      // 辅助：计算 fx/fy 时使用的水平 FOV（度）
 
 	// 求解结果
-	FTransform SolvedPose;
-	double ReprojectionError = -1.0;
-	double TranslationError = -1.0;
-	double RotationError = -1.0;
-	bool bLastSolveSuccess = false;
-};
+	FTransform m_SolvedPose;
+	double m_ReprojectionError = -1.0;
+	double m_TranslationError = -1.0;
+	double m_RotationError = -1.0;
+	bool m_bLastSolveSuccess = false;
+	bool m_bAutoSolve = false;   // 自动求解（每帧触发）
 
+	// 材质颜色参数名（用于修改场景中 Actor 的材质颜色）
+	FName m_MaterialColorParamName = FName("Color");
+};

@@ -73,7 +73,7 @@ private:
 	// 左侧预览 SceneCapture（插件内部）
 	void EnsureSceneCapture();
 	void UpdateLeftPreviewCapture();  // 锁定到求解位姿 / 否则跟随活动视口
-	void UpdateLeftOverlaySize();     // 半透明纹理叠加的尺寸 = 场景渲染 / PreviewFOVScale
+	void UpdateLeftOverlaySize();     // 半透明纹理叠加的尺寸
 	FOptionalSize GetSceneAspectRatio() const;
 	FOptionalSize GetRTAspectRatio() const;
 
@@ -90,9 +90,6 @@ private:
 	void   SetResW(int32 V) { m_TargetTexRes.X = V; }
 	int32  GetResH() const { return m_TargetTexRes.Y; }
 	void   SetResH(int32 V) { m_TargetTexRes.Y = V; }
-	double GetPreviewFOVScale() const { return m_PreviewFOVScale; }
-	void   SetPreviewFOVScale(double V) { m_PreviewFOVScale = V; }
-
 	// 内参辅助计算
 	double  GetHelperFOV() const { return m_HelperFOV; }
 	void    SetHelperFOV(double V) { m_HelperFOV = FMath::Clamp(V, 0.1, 179.9); }
@@ -200,7 +197,6 @@ private:
 	double m_Cx = 960.0;
 	double m_Cy = 540.0;
 	FIntPoint m_TargetTexRes = FIntPoint(1920, 1080);
-	double m_PreviewFOVScale = 1.0; // 左侧预览 FOV 倍率（>1 场景略大于纹理，便于判断对齐）
 	double m_HelperFOV = 90.0;      // 辅助：计算 fx/fy 时使用的水平 FOV（度）
 
 	// 求解结果

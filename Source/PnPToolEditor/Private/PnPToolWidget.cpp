@@ -217,13 +217,6 @@ TSharedRef<SWidget> SPnPToolWidget::BuildInputPanel()
 					SNew(SSpinBox<int32>).Value(this, &SPnPToolWidget::GetResH).OnValueChanged(this, &SPnPToolWidget::SetResH)
 					.MinValue(1).MaxValue(8192).Delta(1))
 			]
-			+ SScrollBox::Slot().Padding(2)
-			[
-				MakeRow(LOCTEXT("fovScaleLabel", "预览FOV倍率"),
-					SNew(SSpinBox<double>).Value(this, &SPnPToolWidget::GetPreviewFOVScale).OnValueChanged(this, &SPnPToolWidget::SetPreviewFOVScale)
-					.MinValue(0.5).MaxValue(3.0).Delta(0.05))
-			]
-
 			// 内参辅助计算
 			+ SScrollBox::Slot().Padding(2, 6, 2, 2)
 			[
@@ -518,10 +511,10 @@ void SPnPToolWidget::UpdateLeftPreviewCapture()
 
 	if (m_bPreviewPoseLocked && m_bLastSolveSuccess)
 	{
-		// 锁定到求解位姿；FOV 由内参推导（水平 FOV），再乘预览倍率
+		// 锁定到求解位姿；FOV 由内参推导（水平 FOV）
 		m_DebugSceneCapture->SetActorTransform(m_SolvedPose);
 		const double FOVh = 2.0 * FMath::Atan(static_cast<double>(m_TargetTexRes.X) / (2.0 * m_Fx)) * (180.0 / PI);
-		Comp->FOVAngle = FOVh * m_PreviewFOVScale;
+		Comp->FOVAngle = FOVh;
 		// 强制渲染一帧，确保预览视口立即更新
 		Comp->CaptureScene();
 	}
@@ -576,10 +569,8 @@ void SPnPToolWidget::UpdateLeftOverlaySize()
 		OverlaySize.Y = SceneSize.X / TexAspect;
 	}
 
-	// PreviewFOVScale：倍率>1 场景渲染略大于纹理，便于判断对齐
-	const double S = 1.0 / FMath::Max(0.1, m_PreviewFOVScale);
-	m_SceneOverlayBox->SetWidthOverride(OverlaySize.X * S);
-	m_SceneOverlayBox->SetHeightOverride(OverlaySize.Y * S);
+	m_SceneOverlayBox->SetWidthOverride(OverlaySize.X);
+	m_SceneOverlayBox->SetHeightOverride(OverlaySize.Y);
 
 	// 画刷保持纹理原始尺寸，SImage 按 SBox 尺寸缩放（不拉伸）
 	m_SceneOverlayBrush.ImageSize = FVector2D(TexW, TexH);
@@ -690,9 +681,9 @@ FReply SPnPToolWidget::OnApplyTexSizeClicked()
 		return FReply::Handled();
 	}
 	m_TargetTexRes = FIntPoint(W, H);
-	// 对于视觉像素坐标系（0 顶），光心在中心像素，准确值是 (W-1)/2, (H-1)/2
-	m_Cx = static_cast<double>(W - 1) * 0.5;
-	m_Cy = static_cast<double>(H - 1) * 0.5;
+	// 光心取图像中心 W/2、H/2（OpenCV 常用约定，数值整洁）
+	m_Cx = static_cast<double>(W) * 0.5;
+	m_Cy = static_cast<double>(H) * 0.5;
 	LogMessage(FString::Printf(TEXT("[内参] Resolution=%dx%d, cx=%.1f, cy=%.1f 已应用"), W, H, m_Cx, m_Cy));
 	return FReply::Handled();
 }
@@ -711,9 +702,9 @@ FReply SPnPToolWidget::OnComputeFxFyFromFOVClicked()
 		LogMessage(TEXT("[错误] FOV 太小"));
 		return FReply::Handled();
 	}
-	// 水平 FOV → fx = (W-1)/2 / tan(FOVh/2)
+	// 水平 FOV → fx = (W/2) / tan(FOVh/2) = W / (2 * tan(FOVh/2))
 	// 对于渲染相机，像素方形 → fx ≈ fy
-	m_Fx = static_cast<double>(m_TargetTexRes.X - 1) * 0.5 / TanHalf;
+	m_Fx = static_cast<double>(m_TargetTexRes.X) * 0.5 / TanHalf;
 	m_Fy = m_Fx;
 	LogMessage(FString::Printf(TEXT("[内参] 水平FOV=%.2f° → fx=fy=%.3f (基于ResW=%d)"), m_HelperFOV, m_Fx, m_TargetTexRes.X));
 	return FReply::Handled();

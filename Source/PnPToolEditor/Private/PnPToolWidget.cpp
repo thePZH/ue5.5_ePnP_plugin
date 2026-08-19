@@ -69,17 +69,17 @@ void SPnPToolWidget::Construct(const FArguments& InArgs)
 	m_DebugRT = NewObject<UTextureRenderTarget2D>(GetTransientPackage(), TEXT("PnPScenePreviewRT"), RF_Transient);
 	m_DebugRT->InitAutoFormat(m_TargetTexRes.X, m_TargetTexRes.Y);
 	m_DebugRT->UpdateResource();
-	m_SceneBrush.SetResourceObject(m_DebugRT.Get());
-	m_SceneBrush.ImageSize = FVector2D(m_TargetTexRes.X, m_TargetTexRes.Y);
-	m_SceneBrush.DrawAs = ESlateBrushDrawType::Image;
+	m_DebugBrush.SetResourceObject(m_DebugRT.Get());
+	m_DebugBrush.ImageSize = FVector2D(m_TargetTexRes.X, m_TargetTexRes.Y);
+	m_DebugBrush.DrawAs = ESlateBrushDrawType::Image;
 
 	// 右侧目标纹理画刷（初始无纹理）
 	m_TargetTextureBrush.DrawAs = ESlateBrushDrawType::Image;
 	m_TargetTextureBrush.TintColor = FSlateColor(FLinearColor::White);
 
 	// 左侧半透明叠加画刷（初始不绘制）
-	m_SceneOverlayBrush.DrawAs = ESlateBrushDrawType::NoDrawType;
-	m_SceneOverlayBrush.TintColor = FSlateColor(FLinearColor(1, 1, 1, 0.5f));
+	m_DebugOverlayBrush.DrawAs = ESlateBrushDrawType::NoDrawType;
+	m_DebugOverlayBrush.TintColor = FSlateColor(FLinearColor(1, 1, 1, 0.5f));
 
 	ChildSlot
 	[
@@ -127,7 +127,7 @@ TSharedRef<SWidget> SPnPToolWidget::BuildScenePreviewPanel()
 				SNew(SBorder).BorderBackgroundColor(FLinearColor::Black)
 				.HAlign(HAlign_Fill).VAlign(VAlign_Fill)
 				[
-					SAssignNew(m_SceneContainerBox, SBox)
+					SAssignNew(m_DebugContainerBox, SBox)
 					.HAlign(HAlign_Fill).VAlign(VAlign_Fill)
 					.MinAspectRatio(TAttribute<FOptionalSize>::Create(TAttribute<FOptionalSize>::FGetter::CreateSP(this, &SPnPToolWidget::GetSceneAspectRatio)))
 					.MaxAspectRatio(TAttribute<FOptionalSize>::Create(TAttribute<FOptionalSize>::FGetter::CreateSP(this, &SPnPToolWidget::GetSceneAspectRatio)))
@@ -136,17 +136,17 @@ TSharedRef<SWidget> SPnPToolWidget::BuildScenePreviewPanel()
 						// 底层：场景渲染
 						+ SOverlay::Slot().HAlign(HAlign_Fill).VAlign(VAlign_Fill)
 						[
-							SAssignNew(m_SceneImageWidget, SImage)
-							.Image(this, &SPnPToolWidget::GetSceneBrush)
+							SAssignNew(m_DebugImage, SImage)
+							.Image(this, &SPnPToolWidget::GetDebugSceneBrush)
 						]
 						// 上层：目标纹理半透明叠加（居中，尺寸由 UpdateLeftOverlaySize 设定）
 						+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Center)
 						[
-							SAssignNew(m_SceneOverlayBox, SBox)
+							SAssignNew(m_DebugOverlayBox, SBox)
 							.HAlign(HAlign_Fill).VAlign(VAlign_Fill)
 							.Visibility(EVisibility::Hidden)
 							[
-								SAssignNew(m_SceneOverlayImage, SImage)
+								SAssignNew(m_DebugOverlayImage, SImage)
 								.Image(this, &SPnPToolWidget::GetSceneOverlayBrush)
 							]
 						]
@@ -509,7 +509,7 @@ void SPnPToolWidget::UpdateLeftPreviewCapture()
 	USceneCaptureComponent2D* Comp = m_DebugSceneCapture->GetCaptureComponent2D();
 	if (!Comp) return;
 
-	if (m_bPreviewPoseLocked && m_bLastSolveSuccess)
+	if (m_bDebugPoseLocked && m_bLastSolveSuccess)
 	{
 		// 锁定到求解位姿；FOV 由内参推导（水平 FOV）
 		m_DebugSceneCapture->SetActorTransform(m_SolvedPose);
@@ -534,21 +534,21 @@ void SPnPToolWidget::UpdateLeftPreviewCapture()
 
 void SPnPToolWidget::UpdateLeftOverlaySize()
 {
-	if (!m_SceneOverlayBox.IsValid() || !m_SceneImageWidget.IsValid()) return;
+	if (!m_DebugOverlayBox.IsValid() || !m_DebugImage.IsValid()) return;
 
-	const bool bShow = m_bPreviewPoseLocked && m_bLastSolveSuccess && m_TargetTexture.IsValid();
+	const bool bShow = m_bDebugPoseLocked && m_bLastSolveSuccess && m_TargetTexture.IsValid();
 	if (!bShow)
 	{
-		m_SceneOverlayBox->SetVisibility(EVisibility::Hidden);
+		m_DebugOverlayBox->SetVisibility(EVisibility::Hidden);
 		return;
 	}
-	m_SceneOverlayBox->SetVisibility(EVisibility::HitTestInvisible);
+	m_DebugOverlayBox->SetVisibility(EVisibility::HitTestInvisible);
 
 	const float TexW = m_TargetTexture->GetSurfaceWidth();
 	const float TexH = m_TargetTexture->GetSurfaceHeight();
 	if (TexW <= 0 || TexH <= 0) return;
 
-	const FGeometry Geo = m_SceneImageWidget->GetCachedGeometry();
+	const FGeometry Geo = m_DebugImage->GetCachedGeometry();
 	const FVector2D SceneSize = Geo.GetLocalSize();
 	if (SceneSize.X <= 0 || SceneSize.Y <= 0) return;
 
@@ -569,11 +569,11 @@ void SPnPToolWidget::UpdateLeftOverlaySize()
 		OverlaySize.Y = SceneSize.X / TexAspect;
 	}
 
-	m_SceneOverlayBox->SetWidthOverride(OverlaySize.X);
-	m_SceneOverlayBox->SetHeightOverride(OverlaySize.Y);
+	m_DebugOverlayBox->SetWidthOverride(OverlaySize.X);
+	m_DebugOverlayBox->SetHeightOverride(OverlaySize.Y);
 
 	// 画刷保持纹理原始尺寸，SImage 按 SBox 尺寸缩放（不拉伸）
-	m_SceneOverlayBrush.ImageSize = FVector2D(TexW, TexH);
+	m_DebugOverlayBrush.ImageSize = FVector2D(TexW, TexH);
 }
 
 FOptionalSize SPnPToolWidget::GetSceneAspectRatio() const
@@ -635,10 +635,10 @@ void SPnPToolWidget::OnTargetTextureChanged(const FAssetData& InAssetData)
 	m_TargetPanOffset = FVector2D::ZeroVector;
     
 	// 若已有求解结果，同步更新左侧叠加纹理
-	if (m_bPreviewPoseLocked)
+	if (m_bDebugPoseLocked)
 	{
-		m_SceneOverlayBrush.SetResourceObject(Tex);
-		m_SceneOverlayBrush.DrawAs = Tex ? ESlateBrushDrawType::Image : ESlateBrushDrawType::NoDrawType;
+		m_DebugOverlayBrush.SetResourceObject(Tex);
+		m_DebugOverlayBrush.DrawAs = Tex ? ESlateBrushDrawType::Image : ESlateBrushDrawType::NoDrawType;
 	}
     
 	// 强制刷新右侧纹理视口
@@ -835,9 +835,9 @@ FReply SPnPToolWidget::OnClearAllClicked()
 	m_ActivePairIndex = INDEX_NONE;
 	m_InputMode = EInputMode::Idle;
 	m_bTargetShowCurCrosshair = false;
-	m_bPreviewPoseLocked = false;
-	m_SceneOverlayBrush.SetResourceObject(nullptr);
-	m_SceneOverlayBrush.DrawAs = ESlateBrushDrawType::NoDrawType;
+	m_bDebugPoseLocked = false;
+	m_DebugOverlayBrush.SetResourceObject(nullptr);
+	m_DebugOverlayBrush.DrawAs = ESlateBrushDrawType::NoDrawType;
 	RebuildPairsList();
 	RebuildRTMarkers();
 	LogMessage(TEXT("[清除] 已清空所有配对并重置预览"));
@@ -1415,10 +1415,10 @@ void SPnPToolWidget::ApplyIntrinsicsToSolver(UPnPSolverSubsystem* Solver) const
 
 void SPnPToolWidget::ApplySolvedPoseToPreview()
 {
-	m_bPreviewPoseLocked = true;
-	m_SceneOverlayBrush.SetResourceObject(m_TargetTexture.Get());
-	m_SceneOverlayBrush.DrawAs = m_TargetTexture.IsValid() ? ESlateBrushDrawType::Image : ESlateBrushDrawType::NoDrawType;
-	m_SceneOverlayBrush.TintColor = FSlateColor(FLinearColor(1, 1, 1, 0.5f));
+	m_bDebugPoseLocked = true;
+	m_DebugOverlayBrush.SetResourceObject(m_TargetTexture.Get());
+	m_DebugOverlayBrush.DrawAs = m_TargetTexture.IsValid() ? ESlateBrushDrawType::Image : ESlateBrushDrawType::NoDrawType;
+	m_DebugOverlayBrush.TintColor = FSlateColor(FLinearColor(1, 1, 1, 0.5f));
 	UpdateLeftPreviewCapture();
 	UpdateLeftOverlaySize();
 	LogMessage(TEXT("[预览] 已将求解外参应用到左侧预览相机，并叠加目标纹理（半透明）"));
@@ -1519,7 +1519,7 @@ void SPnPToolWidget::Tick(const FGeometry& AllottedGeometry, const double InCurr
 	{
 		m_DebugRT->InitAutoFormat(m_TargetTexRes.X, m_TargetTexRes.Y);
 		m_DebugRT->UpdateResource();
-		m_SceneBrush.ImageSize = FVector2D(m_TargetTexRes.X, m_TargetTexRes.Y);
+		m_DebugBrush.ImageSize = FVector2D(m_TargetTexRes.X, m_TargetTexRes.Y);
 		if (m_DebugSceneCapture.IsValid() && m_DebugSceneCapture->GetCaptureComponent2D())
 		{
 			m_DebugSceneCapture->GetCaptureComponent2D()->TextureTarget = m_DebugRT.Get();

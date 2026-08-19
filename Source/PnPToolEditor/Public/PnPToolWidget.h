@@ -100,9 +100,9 @@ private:
 	FString GetTargetTexturePath() const;
 	void    OnTargetTextureChanged(const FAssetData& InAssetData);
 
-	const FSlateBrush* GetSceneBrush() const { return &m_SceneBrush; }
+	const FSlateBrush* GetDebugSceneBrush() const { return &m_DebugBrush; }
 	const FSlateBrush* GetRTTextureBrush() const { return &m_TargetTextureBrush; }
-	const FSlateBrush* GetSceneOverlayBrush() const { return &m_SceneOverlayBrush; }
+	const FSlateBrush* GetSceneOverlayBrush() const { return &m_DebugOverlayBrush; }
 
 	// 配对管理
 	FReply OnAdd3DPointClicked();            // 读取编辑器选中 Actor
@@ -152,13 +152,13 @@ private:
 	// 左侧验证窗口
 	TWeakObjectPtr<UTextureRenderTarget2D> m_DebugRT;
 	TWeakObjectPtr<ASceneCapture2D> m_DebugSceneCapture;
-	FSlateBrush m_SceneBrush;
-	TSharedPtr<SImage> m_SceneImageWidget;
-	TSharedPtr<SBox> m_SceneContainerBox;
-	TSharedPtr<SImage> m_SceneOverlayImage;
-	FSlateBrush m_SceneOverlayBrush;
-	TSharedPtr<SBox> m_SceneOverlayBox;
-	bool m_bPreviewPoseLocked = false;
+	FSlateBrush m_DebugBrush;
+	TSharedPtr<SImage> m_DebugImage;
+	TSharedPtr<SBox> m_DebugContainerBox;
+	TSharedPtr<SImage> m_DebugOverlayImage;
+	FSlateBrush m_DebugOverlayBrush;
+	TSharedPtr<SBox> m_DebugOverlayBox;
+	bool m_bDebugPoseLocked = false;
 
 	// 目标纹理 + 右侧视口
 	TWeakObjectPtr<UTexture2D> m_TargetTexture;

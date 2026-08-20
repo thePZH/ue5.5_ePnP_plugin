@@ -2,6 +2,7 @@
 
 #include "PnPToolWidget.h"
 #include "PnPSolverSubsystem.h"
+#include "PnPMarkerActor.h"
 
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/Input/SSpinBox.h"
@@ -36,6 +37,8 @@
 #include "Selection.h"
 #include "EngineUtils.h"
 #include "Components/MeshComponent.h"
+#include "Widgets/Input/SEditableText.h"
+#include "Widgets/Text/SMultiLineEditableText.h"
 #include "Widgets/Input/SEditableTextBox.h"
 #include "RenderingThread.h"
 
@@ -85,19 +88,84 @@ void SPnPToolWidget::Construct(const FArguments& InArgs)
 	[
 		SNew(SHorizontalBox)
 
-		// 左半：场景预览（无鼠标交互）
-		+ SHorizontalBox::Slot().FillWidth(0.5f).Padding(4)
-		[
-			BuildScenePreviewPanel()
-		]
-
-		// 右半：三段式
+		// 左半：求解结果 + 场景预览（含叠加控制）+ 操作日志
 		+ SHorizontalBox::Slot().FillWidth(0.5f).Padding(4)
 		[
 			SNew(SSplitter).Orientation(Orient_Vertical)
-			+ SSplitter::Slot().Value(0.42f)[ BuildInputPanel() ]
-			+ SSplitter::Slot().Value(0.38f)[ BuildRTPreviewPanel() ]
-			+ SSplitter::Slot().Value(0.20f)[ BuildResultsPanel() ]
+			+ SSplitter::Slot().Value(0.15f)
+			[
+				SNew(SBorder)
+				.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
+				.Padding(6)
+				[
+					SNew(SVerticalBox)
+					+ SVerticalBox::Slot().AutoHeight()
+					[
+						SNew(STextBlock)
+						.Text(LOCTEXT("ResultsHeader", "求解结果"))
+						.Font(FCoreStyle::GetDefaultFontStyle("Bold", 11))
+					]
+					+ SVerticalBox::Slot().FillHeight(1.0f)
+					[
+						SAssignNew(m_ResultTextWidget, SMultiLineEditableText)
+						.Text_Lambda([this]()
+						{
+							if (!m_bLastSolveSuccess) return FText::FromString(TEXT("未求解 / 求解失败"));
+							const FVector L = m_SolvedPose.GetLocation();
+							const FRotator R = m_SolvedPose.Rotator();
+							return FText::FromString(FString::Printf(
+								TEXT("求解成功\n\n位置: (%.2f, %.2f, %.2f) cm\n旋转: P=%.2f Y=%.2f R=%.2f deg\n\n重投影误差: %.6f px"),
+								L.X, L.Y, L.Z, R.Pitch, R.Yaw, R.Roll, m_ReprojectionError));
+						})
+						.IsReadOnly(true)
+						.AutoWrapText(true)
+					]
+				]
+			]
+			+ SSplitter::Slot().Value(0.65f)
+			[
+				BuildScenePreviewPanel()
+			]
+			+ SSplitter::Slot().Value(0.20f)
+			[
+				SNew(SBorder)
+				.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
+				.Padding(6)
+				[
+					SNew(SVerticalBox)
+					+ SVerticalBox::Slot().AutoHeight()
+					[
+						SNew(STextBlock)
+						.Text(LOCTEXT("LogHeader", "操作日志"))
+						.Font(FCoreStyle::GetDefaultFontStyle("Bold", 9))
+						.ColorAndOpacity(FLinearColor::Gray)
+					]
+					+ SVerticalBox::Slot().FillHeight(1.0f)
+					[
+						SAssignNew(m_MessagesScrollBox, SScrollBox)
+						+ SScrollBox::Slot()
+						[
+							SAssignNew(m_MessagesTextWidget, SMultiLineEditableText)
+							.Text_Lambda([this]()
+							{
+								TArray<FText> T; T.Reserve(m_Messages.Num());
+								for (const FString& M : m_Messages) T.Add(FText::FromString(M));
+								return FText::Join(FText::FromString(TEXT("\n")), T);
+							})
+							.IsReadOnly(true)
+							.AutoWrapText(true)
+						]
+					]
+				]
+			]
+		]
+
+		// 右半：输入 + 纹理视口（移除了结果面板，空间更充裕）
+		+ SHorizontalBox::Slot().FillWidth(0.5f).Padding(4)
+		[
+			SNew(SSplitter).Orientation(Orient_Vertical)
+			+ SSplitter::Slot().Value(0.55f)[ BuildInputPanel() ]
+			+ SSplitter::Slot().Value(0.45f)[ BuildRTPreviewPanel() ]
 		]
 	];
 
@@ -121,6 +189,28 @@ TSharedRef<SWidget> SPnPToolWidget::BuildScenePreviewPanel()
 				SNew(STextBlock)
 				.Text(LOCTEXT("SceneHeader", "场景预览（求解后自动应用外参 + 半透明叠加目标纹理，肉眼对比对齐）"))
 				.Font(FCoreStyle::GetDefaultFontStyle("Bold", 11))
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0, 2, 0, 2)
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(2, 0, 6, 0)
+				[
+					SNew(STextBlock).Text(LOCTEXT("OverlayOpacityLabel", "叠加不透明度"))
+				]
+				+ SHorizontalBox::Slot().FillWidth(1.0f)
+				[
+					SNew(SSpinBox<float>).Value(this, &SPnPToolWidget::GetOverlayOpacity).OnValueChanged(this, &SPnPToolWidget::SetOverlayOpacity)
+					.MinValue(0.0f).MaxValue(1.0f).Delta(0.05f)
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(6, 0, 6, 0)
+				[
+					SNew(STextBlock).Text(LOCTEXT("OverlayScaleLabel", "放大倍率"))
+				]
+				+ SHorizontalBox::Slot().FillWidth(1.0f)
+				[
+					SNew(SSpinBox<float>).Value(this, &SPnPToolWidget::GetOverlayScale).OnValueChanged(this, &SPnPToolWidget::SetOverlayScale)
+					.MinValue(0.5f).MaxValue(3.0f).Delta(0.05f)
+				]
 			]
 			+ SVerticalBox::Slot().FillHeight(1.0f)
 			[
@@ -323,6 +413,12 @@ TSharedRef<SWidget> SPnPToolWidget::BuildInputPanel()
 							.Text(LOCTEXT("ClearAllBtn", "清除所有"))
 							.OnClicked(this, &SPnPToolWidget::OnClearAllClicked)
 						]
+						+ SHorizontalBox::Slot().FillWidth(1.0f).Padding(2)
+						[
+							SNew(SButton)
+							.Text(LOCTEXT("RecreateMakersBtn", "重新生成Maker"))
+							.OnClicked(this, &SPnPToolWidget::OnRecreateMakersClicked)
+						]
 					]
 				]
 			]
@@ -417,65 +513,6 @@ TSharedRef<SWidget> SPnPToolWidget::BuildRTPreviewPanel()
         ];
 }
 
-TSharedRef<SWidget> SPnPToolWidget::BuildResultsPanel()
-{
-	return SNew(SBorder)
-		.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
-		.Padding(6)
-		[
-			SNew(SVerticalBox)
-			+ SVerticalBox::Slot().AutoHeight()
-			[
-				SNew(STextBlock).Text(LOCTEXT("ResultsHeader", "求解结果 / 日志")).Font(FCoreStyle::GetDefaultFontStyle("Bold", 11))
-			]
-			+ SVerticalBox::Slot().FillHeight(0.35f).Padding(0, 4, 0, 0)
-			[
-				SNew(SScrollBox)
-				+ SScrollBox::Slot()
-				[
-					SNew(STextBlock)
-					.Text_Lambda([this]()
-					{
-						if (!m_bLastSolveSuccess) return FText::FromString(TEXT("未求解 / 求解失败"));
-						const FVector L = m_SolvedPose.GetLocation();
-						const FRotator R = m_SolvedPose.Rotator();
-						return FText::FromString(FString::Printf(
-							TEXT("求解成功\n\n位置: (%.2f, %.2f, %.2f) cm\n旋转: P=%.2f Y=%.2f R=%.2f deg\n\n重投影误差: %.6f px"),
-							L.X, L.Y, L.Z, R.Pitch, R.Yaw, R.Roll, m_ReprojectionError));
-					})
-					.AutoWrapText(true)
-				]
-			]
-			+ SVerticalBox::Slot().FillHeight(0.65f).Padding(0, 4, 0, 0)
-			[
-				SNew(SBorder).BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder")).Padding(4)
-				[
-					SNew(SVerticalBox)
-					+ SVerticalBox::Slot().AutoHeight()
-					[
-						SNew(STextBlock).Text(LOCTEXT("LogHeader", "操作日志")).Font(FCoreStyle::GetDefaultFontStyle("Bold", 9)).ColorAndOpacity(FLinearColor::Gray)
-					]
-					+ SVerticalBox::Slot().FillHeight(1.0f)
-					[
-						SAssignNew(m_MessagesScrollBox, SScrollBox)
-						+ SScrollBox::Slot()
-						[
-							SAssignNew(m_MessagesTextWidget, STextBlock)
-							.Text_Lambda([this]()
-							{
-								TArray<FText> T; T.Reserve(m_Messages.Num());
-								for (const FString& M : m_Messages) T.Add(FText::FromString(M));
-								return FText::Join(FText::FromString(TEXT("\n")), T);
-							})
-							.AutoWrapText(true)
-							.ColorAndOpacity(FLinearColor::White)
-						]
-					]
-				]
-			]
-		];
-}
-
 // =========================================================================
 // 左侧预览 SceneCapture
 // =========================================================================
@@ -511,10 +548,40 @@ void SPnPToolWidget::UpdateLeftPreviewCapture()
 
 	if (m_bDebugPoseLocked && m_bLastSolveSuccess)
 	{
-		// 锁定到求解位姿；FOV 由内参推导（水平 FOV）
+		// 锁定到求解位姿
 		m_DebugSceneCapture->SetActorTransform(m_SolvedPose);
-		const double FOVh = 2.0 * FMath::Atan(static_cast<double>(m_TargetTexRes.X) / (2.0 * m_Fx)) * (180.0 / PI);
-		Comp->FOVAngle = FOVh;
+
+		// 原始水平 FOV（弧度）
+		const double FOVh = 2.0 * FMath::Atan(static_cast<double>(m_TargetTexRes.X) / (2.0 * m_Fx));
+
+		// 放大倍率：RT 的 FOV 和分辨率都按此倍数放大
+		const double S = FMath::Max(0.5, static_cast<double>(m_OverlayScale));
+		const int32 RTW = FMath::CeilToInt(static_cast<double>(m_TargetTexRes.X) * S);
+		const int32 RTH = FMath::CeilToInt(static_cast<double>(m_TargetTexRes.Y) * S);
+
+		// 调整 RT 分辨率
+		if (m_DebugRT.IsValid() && (m_DebugRT->SizeX != RTW || m_DebugRT->SizeY != RTH))
+		{
+			m_DebugRT->InitAutoFormat(RTW, RTH);
+			m_DebugRT->UpdateResource();
+			m_DebugBrush.ImageSize = FVector2D(RTW, RTH);
+			Comp->TextureTarget = m_DebugRT.Get();
+		}
+
+		// 新 FOV = 2 * atan(S * tan(FOV_original/2))
+		Comp->FOVAngle = 2.0 * FMath::Atan(S * FMath::Tan(FOVh / 2.0)) * (180.0 / PI);
+
+		// 将所有 Maker 标记点加入隐藏列表，不在 debug 场景中渲染
+		Comp->HiddenActors.Reset();
+		UWorld* World = m_DebugSceneCapture->GetWorld();
+		if (World)
+		{
+			for (TActorIterator<APnPMarkerActor> It(World); It; ++It)
+			{
+				Comp->HiddenActors.Add(*It);
+			}
+		}
+
 		// 强制渲染一帧，确保预览视口立即更新
 		Comp->CaptureScene();
 	}
@@ -569,11 +636,16 @@ void SPnPToolWidget::UpdateLeftOverlaySize()
 		OverlaySize.Y = SceneSize.X / TexAspect;
 	}
 
-	m_DebugOverlayBox->SetWidthOverride(OverlaySize.X);
-	m_DebugOverlayBox->SetHeightOverride(OverlaySize.Y);
+	// 叠加放大倍率：>1.0 时 RT 的 FOV 更宽，SceneCapture 的可视范围更大
+	// 叠加纹理保持原始内参 FOV，尺寸除以倍率使其只覆盖中心区域
+	const float S = FMath::Max(0.5f, m_OverlayScale);
+	m_DebugOverlayBox->SetWidthOverride(OverlaySize.X / S);
+	m_DebugOverlayBox->SetHeightOverride(OverlaySize.Y / S);
 
 	// 画刷保持纹理原始尺寸，SImage 按 SBox 尺寸缩放（不拉伸）
 	m_DebugOverlayBrush.ImageSize = FVector2D(TexW, TexH);
+	// 同步不透明度
+	m_DebugOverlayBrush.TintColor = FSlateColor(FLinearColor(1, 1, 1, m_OverlayOpacity));
 }
 
 FOptionalSize SPnPToolWidget::GetSceneAspectRatio() const
@@ -774,7 +846,6 @@ FReply SPnPToolWidget::OnAdd3DPointClicked()
 		P.Color = GetPaletteColor(P.Id);
 		P.SourceActor = Actor;
 		P.Point3D = Actor->GetActorLocation();
-		P.DisplayName = Actor->GetActorLabel();
 		P.bHas2D = false;
 		m_Pairs.Add(MoveTemp(P));
 		ApplyColorToActor(Actor, m_Pairs.Last().Color);
@@ -844,6 +915,42 @@ FReply SPnPToolWidget::OnClearAllClicked()
 	return FReply::Handled();
 }
 
+FReply SPnPToolWidget::OnRecreateMakersClicked()
+{
+	if (!GEditor) return FReply::Handled();
+	UWorld* World = GEditor->GetEditorWorldContext().World();
+	if (!World) return FReply::Handled();
+
+	int32 Recreated = 0;
+	for (FPair& P : m_Pairs)
+	{
+		if (P.SourceActor.IsValid()) continue;
+		// 尝试在世界中按名字查找已丢失的 Actor
+		// 由于我们不知道原 Actor 的类，使用 APnPMarkerActor 类型
+		FActorSpawnParameters Params;
+		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		APnPMarkerActor* NewMarker = World->SpawnActor<APnPMarkerActor>(APnPMarkerActor::StaticClass(), P.Point3D, FRotator::ZeroRotator, Params);
+		if (NewMarker)
+		{
+			NewMarker->SetActorLabel(FString::Printf(TEXT("PnPMarker_%d"), P.Id));
+			P.SourceActor = NewMarker;
+			ApplyColorToActor(NewMarker, P.Color);
+			++Recreated;
+		}
+	}
+
+	if (Recreated > 0)
+	{
+		RebuildPairsList();
+		LogMessage(FString::Printf(TEXT("[重新生成] 已重新创建 %d 个丢失的 Maker Actor"), Recreated));
+	}
+	else
+	{
+		LogMessage(TEXT("[重新生成] 没有丢失的 Maker 需要重新创建"));
+	}
+	return FReply::Handled();
+}
+
 void SPnPToolWidget::SetPairColor(int32 Id, FLinearColor NewColor)
 {
 	for (FPair& P : m_Pairs)
@@ -864,7 +971,17 @@ void SPnPToolWidget::SetPairColor(int32 Id, FLinearColor NewColor)
 
 void SPnPToolWidget::ApplyColorToActor(AActor* Actor, const FLinearColor& Color)
 {
-	if (!Actor || m_MaterialColorParamName.IsNone()) return;
+	if (!Actor) return;
+
+	// 如果是 APnPMarkerActor，使用其自带的 SetMarkerColor 方法（它会读取 Actor 自己保存的参数名）
+	if (APnPMarkerActor* Marker = Cast<APnPMarkerActor>(Actor))
+	{
+		Marker->SetMarkerColor(Color);
+		return;
+	}
+
+	// 普通 Actor：遍历所有 MeshComponent，使用工具全局设置的参数名
+	if (m_MaterialColorParamName.IsNone()) return;
 
 	TArray<UMeshComponent*> MeshComps;
 	Actor->GetComponents<UMeshComponent>(MeshComps);
@@ -893,6 +1010,17 @@ void SPnPToolWidget::SetMaterialColorParamName(const FText& InName)
 		}
 	}
 	LogMessage(FString::Printf(TEXT("[材质] 颜色参数名已更新为 '%s'，已重新应用到所有 Actor"), *m_MaterialColorParamName.ToString()));
+}
+
+void SPnPToolWidget::SetOverlayOpacity(float V)
+{
+	m_OverlayOpacity = FMath::Clamp(V, 0.0f, 1.0f);
+	// 更新画刷透明度，叠加层在 BuildScenePreviewPanel 中初始为 0.5f 半透明
+	m_DebugOverlayBrush.TintColor = FSlateColor(FLinearColor(1, 1, 1, m_OverlayOpacity));
+	if (m_DebugOverlayImage.IsValid())
+	{
+		m_DebugOverlayImage->Invalidate(EInvalidateWidgetReason::Paint);
+	}
 }
 
 void SPnPToolWidget::OpenColorPickerForPair(int32 Index)
@@ -940,50 +1068,57 @@ void SPnPToolWidget::RebuildPairsList()
 		}))
 			[
 				SNew(SHorizontalBox)
-				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(2)
+				// 首列：Actor 对象引用 + 选择按钮
+				+ SHorizontalBox::Slot().FillWidth(1.5f).Padding(2).VAlign(VAlign_Center)
 				[
-					SNew(STextBlock)
-					.Text_Lambda([this, CapturedIdx]()
-					{
-						return FText::FromString(FString::Printf(TEXT("#%d"),
-							m_Pairs.IsValidIndex(CapturedIdx) ? m_Pairs[CapturedIdx].Id : 0));
-					})
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot().FillWidth(3.0f)
+					[
+						SNew(SObjectPropertyEntryBox)
+						.AllowedClass(AActor::StaticClass())
+						.ObjectPath_Lambda([this, CapturedIdx]() -> FString
+						{
+							if (!m_Pairs.IsValidIndex(CapturedIdx)) return FString();
+							AActor* A = m_Pairs[CapturedIdx].SourceActor.Get();
+							return A ? A->GetPathName() : FString();
+						})
+						.OnObjectChanged_Lambda([this, CapturedIdx](const FAssetData& AssetData)
+						{
+							if (!m_Pairs.IsValidIndex(CapturedIdx)) return;
+							AActor* NewActor = Cast<AActor>(AssetData.GetAsset());
+							if (NewActor)
+							{
+								FPair& P = m_Pairs[CapturedIdx];
+								P.SourceActor = NewActor;
+								P.Point3D = NewActor->GetActorLocation();
+								ApplyColorToActor(NewActor, P.Color);
+								RebuildRTMarkers();
+							}
+						})
+						.DisplayUseSelected(true)
+						.DisplayBrowse(false)
+						.DisplayThumbnail(false)
+					]
+					+ SHorizontalBox::Slot().AutoWidth().Padding(2, 0, 0, 0)
+					[
+						SNew(SButton)
+						.Text(FText::FromString(TEXT("Select")))
+						.ToolTipText(LOCTEXT("SelectActorInViewport", "在视口中选中该 Actor"))
+						.OnClicked_Lambda([this, CapturedIdx]() -> FReply
+						{
+							if (!m_Pairs.IsValidIndex(CapturedIdx) || !GEditor) return FReply::Handled();
+							AActor* Actor = m_Pairs[CapturedIdx].SourceActor.Get();
+							if (Actor)
+							{
+								GEditor->SelectNone(false, true, false);
+								GEditor->SelectActor(Actor, true, true, false);
+								GEditor->NoteSelectionChange();
+							}
+							return FReply::Handled();
+						})
+					]
 				]
-				+ SHorizontalBox::Slot().FillWidth(1.4f).Padding(2).VAlign(VAlign_Center)
-				[
-					SNew(STextBlock)
-					.Text_Lambda([this, CapturedIdx]()
-					{
-						return FText::FromString(m_Pairs.IsValidIndex(CapturedIdx) ? m_Pairs[CapturedIdx].DisplayName : TEXT(""));
-					})
-				]
-				+ SHorizontalBox::Slot().FillWidth(1.6f).Padding(2).VAlign(VAlign_Center)
-				[
-					SNew(STextBlock)
-					.Text_Lambda([this, CapturedIdx]()
-					{
-						if (!m_Pairs.IsValidIndex(CapturedIdx)) return FText::GetEmpty();
-						const FVector& P = m_Pairs[CapturedIdx].Point3D;
-						return FText::FromString(FString::Printf(TEXT("3D(%.1f,%.1f,%.1f)"), P.X, P.Y, P.Z));
-					})
-				]
-				+ SHorizontalBox::Slot().FillWidth(1.2f).Padding(2).VAlign(VAlign_Center)
-				[
-					SNew(STextBlock)
-					.Text_Lambda([this, CapturedIdx]()
-					{
-						if (!m_Pairs.IsValidIndex(CapturedIdx)) return FText::GetEmpty();
-						if (!m_Pairs[CapturedIdx].bHas2D) return FText::FromString(TEXT("2D:未设置"));
-						const FVector2D& P = m_Pairs[CapturedIdx].Point2D;
-						return FText::FromString(FString::Printf(TEXT("2D(%.1f,%.1f)"), P.X, P.Y));
-					})
-					.ColorAndOpacity(TAttribute<FSlateColor>::CreateLambda([this, CapturedIdx]()
-					{
-						if (!m_Pairs.IsValidIndex(CapturedIdx) || !m_Pairs[CapturedIdx].bHas2D)
-							return FSlateColor(FLinearColor::Gray);
-						return FSlateColor(m_Pairs[CapturedIdx].Color);
-					}))
-				]
+				// 第二列：颜色色块
 				+ SHorizontalBox::Slot().AutoWidth().Padding(2).VAlign(VAlign_Center)
 				[
 					SNew(SColorBlock)
@@ -998,6 +1133,38 @@ void SPnPToolWidget::RebuildPairsList()
 						return FReply::Handled();
 					}))
 				]
+				// 第三列：3D 坐标
+				+ SHorizontalBox::Slot().FillWidth(1.6f).Padding(2).VAlign(VAlign_Center)
+				[
+					SNew(STextBlock)
+					.Text_Lambda([this, CapturedIdx]()
+					{
+						if (!m_Pairs.IsValidIndex(CapturedIdx)) return FText::GetEmpty();
+						const FVector& P = m_Pairs[CapturedIdx].Point3D;
+						return FText::FromString(FString::Printf(TEXT("3D(%.1f,%.1f,%.1f)"), P.X, P.Y, P.Z));
+					})
+					.Font(FCoreStyle::GetDefaultFontStyle("Regular", 8))
+				]
+				// 第四列：2D 坐标
+				+ SHorizontalBox::Slot().FillWidth(1.4f).Padding(2).VAlign(VAlign_Center)
+				[
+					SNew(STextBlock)
+					.Text_Lambda([this, CapturedIdx]()
+					{
+						if (!m_Pairs.IsValidIndex(CapturedIdx)) return FText::GetEmpty();
+						if (!m_Pairs[CapturedIdx].bHas2D) return FText::FromString(TEXT("2D:—"));
+						const FVector2D& P = m_Pairs[CapturedIdx].Point2D;
+						return FText::FromString(FString::Printf(TEXT("2D(%.1f,%.1f)"), P.X, P.Y));
+					})
+					.ColorAndOpacity(TAttribute<FSlateColor>::CreateLambda([this, CapturedIdx]()
+					{
+						if (!m_Pairs.IsValidIndex(CapturedIdx) || !m_Pairs[CapturedIdx].bHas2D)
+							return FSlateColor(FLinearColor::Gray);
+						return FSlateColor(m_Pairs[CapturedIdx].Color);
+					}))
+					.Font(FCoreStyle::GetDefaultFontStyle("Regular", 8))
+				]
+				// 第五列：编辑2D按钮
 				+ SHorizontalBox::Slot().AutoWidth().Padding(2).VAlign(VAlign_Center)
 				[
 					SNew(SButton)
@@ -1007,12 +1174,14 @@ void SPnPToolWidget::RebuildPairsList()
 						.Text_Lambda([this, CapturedIdx]()
 						{
 							const bool bAct = (CapturedIdx == m_ActivePairIndex && m_InputMode == EInputMode::Edit2D);
-							return FText::FromString(bAct ? TEXT("●2D编辑中") : TEXT("编辑2D"));
+							return FText::FromString(bAct ? TEXT("●编辑中") : TEXT("编辑2D"));
 						})
 						.Justification(ETextJustify::Type::Center)
+						.Font(FCoreStyle::GetDefaultFontStyle("Regular", 8))
 					]
 					.OnClicked_Lambda([this, CapturedIdx]() { return OnEdit2DClicked(CapturedIdx); })
 				]
+				// 第六列：删除按钮
 				+ SHorizontalBox::Slot().AutoWidth().Padding(2).VAlign(VAlign_Center)
 				[
 					SNew(SButton)
@@ -1514,15 +1683,18 @@ void SPnPToolWidget::Tick(const FGeometry& AllottedGeometry, const double InCurr
 {
 	EnsureSceneCapture();
 
-	// 预览 RT 尺寸跟随内参分辨率（保证场景渲染宽高比与目标纹理一致）
-	if (m_DebugRT.IsValid() && (m_DebugRT->SizeX != m_TargetTexRes.X || m_DebugRT->SizeY != m_TargetTexRes.Y))
+	// 未锁定/未求解时，RT 尺寸跟随目标纹理分辨率
+	if (!m_bDebugPoseLocked || !m_bLastSolveSuccess)
 	{
-		m_DebugRT->InitAutoFormat(m_TargetTexRes.X, m_TargetTexRes.Y);
-		m_DebugRT->UpdateResource();
-		m_DebugBrush.ImageSize = FVector2D(m_TargetTexRes.X, m_TargetTexRes.Y);
-		if (m_DebugSceneCapture.IsValid() && m_DebugSceneCapture->GetCaptureComponent2D())
+		if (m_DebugRT.IsValid() && (m_DebugRT->SizeX != m_TargetTexRes.X || m_DebugRT->SizeY != m_TargetTexRes.Y))
 		{
-			m_DebugSceneCapture->GetCaptureComponent2D()->TextureTarget = m_DebugRT.Get();
+			m_DebugRT->InitAutoFormat(m_TargetTexRes.X, m_TargetTexRes.Y);
+			m_DebugRT->UpdateResource();
+			m_DebugBrush.ImageSize = FVector2D(m_TargetTexRes.X, m_TargetTexRes.Y);
+			if (m_DebugSceneCapture.IsValid() && m_DebugSceneCapture->GetCaptureComponent2D())
+			{
+				m_DebugSceneCapture->GetCaptureComponent2D()->TextureTarget = m_DebugRT.Get();
+			}
 		}
 	}
 

@@ -12,6 +12,7 @@ class UTextureRenderTarget2D;
 class UTexture2D;
 class ASceneCapture2D;
 class UPnPSolverSubsystem;
+class APnPMarkerActor;
 class AActor;
 class SCanvas;
 class SImage;
@@ -20,6 +21,7 @@ class SBorder;
 class SVerticalBox;
 class STextBlock;
 class SScrollBox;
+class SMultiLineEditableText;
 struct FAssetData;
 struct FPointerEvent;
 
@@ -31,7 +33,8 @@ struct FPointerEvent;
  *   供用户肉眼对比图像与场景是否对齐。不处理任何鼠标事件。
  * - 右侧：目标纹理视口（用户传入 UTexture2D）。支持滚轮缩放、右键/Shift+Ctrl+滚轮平移、
  *   编辑2D模式下左键按下拖动精确定点。内参完全由用户手动输入（工具不感知任何 SceneCapture2D）。
- * - 3D 点：用户在编辑器主视口拖入预制球体 Actor，全选后点「添加3D点」读取选中 Actor，实时跟随移动。
+ * - 3D 点：用户从编辑器选中 APnPMarkerActor 后点击「添加3D点」读取位置，实时跟随移动。
+ *   如果选中普通 Actor 也会添加（但不会自动修改颜色）。
  * - 每个 pair(3D,2D) 共享一个颜色，用户可调。
  */
 class SPnPToolWidget : public SCompoundWidget
@@ -49,10 +52,9 @@ public:
 	{
 		int32 Id = 0;                       // 自增唯一 id
 		FLinearColor Color = FLinearColor::White;
-		FString DisplayName;                // Actor 名字
-		TWeakObjectPtr<AActor> SourceActor; // 拖入的球体 Actor（3D 点实时跟随它）
+		TWeakObjectPtr<AActor> SourceActor; // Maker Actor（3D 点实时跟随其位置）
 		FVector Point3D = FVector::ZeroVector;
-		FVector2D Point2D = FVector2D::ZeroVector; // 目标纹理像素坐标
+		FVector2D Point2D = FVector2D::ZeroVector; // 目标纹理像素坐标（视觉坐标系，Y=0 顶）
 		bool bHas2D = false;
 	};
 
@@ -68,7 +70,6 @@ private:
 	TSharedRef<SWidget> BuildInputPanel();
 	TSharedRef<SWidget> BuildScenePreviewPanel();
 	TSharedRef<SWidget> BuildRTPreviewPanel();
-	TSharedRef<SWidget> BuildResultsPanel();
 
 	// 左侧预览 SceneCapture（插件内部）
 	void EnsureSceneCapture();
@@ -110,6 +111,7 @@ private:
 	FReply OnDeletePairClicked(int32 Index);
 	FReply OnCancelEditClicked();
 	FReply OnClearAllClicked();
+	FReply OnRecreateMakersClicked();        // 重新生成缺失的 Maker Actor
 	void   SetPairColor(int32 Id, FLinearColor NewColor);
 	void   OpenColorPickerForPair(int32 Index);
 	FLinearColor GetPaletteColor(int32 Index) const;
@@ -118,6 +120,14 @@ private:
 	// 材质参数名
 	FName GetMaterialColorParamName() const { return m_MaterialColorParamName; }
 	void  SetMaterialColorParamName(const FText& InName);
+
+	// 叠加层不透明度
+	float  GetOverlayOpacity() const { return m_OverlayOpacity; }
+	void   SetOverlayOpacity(float V);
+
+	// 叠加层放大倍率（>1.0 时 SceneCapture 的 FOV 更宽，RT 可视范围更大，叠加纹理保持原始内参 FOV 只覆盖中心区域）
+	float  GetOverlayScale() const { return m_OverlayScale; }
+	void   SetOverlayScale(float V) { m_OverlayScale = FMath::Clamp(V, 0.5f, 3.0f); UpdateLeftPreviewCapture(); UpdateLeftOverlaySize(); }
 
 	void RebuildPairsList();
 	void RebuildRTMarkers();   // 重建右侧纹理视口的标记点 widget（结构变化时调用）
@@ -186,9 +196,12 @@ private:
 	// 配对列表 UI 容器
 	TSharedPtr<SVerticalBox> m_PairsListContainer;
 
+	// 求解结果文本
+	TSharedPtr<SMultiLineEditableText> m_ResultTextWidget;
+
 	// 日志
 	TArray<FString> m_Messages;
-	TSharedPtr<STextBlock> m_MessagesTextWidget;
+	TSharedPtr<SMultiLineEditableText> m_MessagesTextWidget;
 	TSharedPtr<SScrollBox> m_MessagesScrollBox;
 
 	// 内参（手动输入）
@@ -209,4 +222,8 @@ private:
 
 	// 材质颜色参数名（用于修改场景中 Actor 的材质颜色）
 	FName m_MaterialColorParamName = FName("Color");
+
+	// 叠加层参数
+	float m_OverlayOpacity = 0.5f;  // 目标纹理叠加不透明度
+	float m_OverlayScale = 1.2f;    // SceneCapture FOV 放大倍率（>1 RT 可视范围更大，叠加纹理保持原始内参 FOV 只覆盖中心区域）
 };

@@ -154,6 +154,9 @@ private:
 	void ApplyIntrinsicsToSolver(UPnPSolverSubsystem* Solver) const;
 	void ApplySolvedPoseToPreview();   // PnP 求解成功回调：把外参应用到左侧预览相机 + 叠加纹理
 
+	// 3D Actor 移动回调（委托绑定）
+	void OnActorMoved(AActor* Actor);
+
 	// 日志
 	void LogMessage(const FString& Msg);
 	void UpdateMessages();
@@ -218,7 +221,8 @@ private:
 	double m_TranslationError = -1.0;
 	double m_RotationError = -1.0;
 	bool m_bLastSolveSuccess = false;
-	bool m_bAutoSolve = false;   // 自动求解（每帧触发）
+	bool m_bAutoSolve = false;   // 自动求解（委托触发，不在 Tick 中轮询）
+	FDelegateHandle m_ActorMovedHandle;  // GEditor->OnActorMoved 委托句柄
 
 	// 材质颜色参数名（用于修改场景中 Actor 的材质颜色）
 	FName m_MaterialColorParamName = FName("Color");

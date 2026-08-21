@@ -52,6 +52,7 @@ SPnPToolWidget::~SPnPToolWidget()
 {
 	if (GEditor)
 	{
+		GEditor->OnActorMoved().Remove(m_ActorMovedHandle);
 		if (UWorld* World = GEditor->GetEditorWorldContext().World())
 		{
 			FlushPersistentDebugLines(World);
@@ -171,6 +172,12 @@ void SPnPToolWidget::Construct(const FArguments& InArgs)
 
 	RebuildPairsList();
 	RebuildRTMarkers();
+
+	// 注册 3D Actor 移动委托，替代 Tick 轮询自动求解
+	if (GEditor)
+	{
+		m_ActorMovedHandle = GEditor->OnActorMoved().AddRaw(this, &SPnPToolWidget::OnActorMoved);
+	}
 }
 
 // =========================================================================
@@ -1593,6 +1600,32 @@ void SPnPToolWidget::ApplySolvedPoseToPreview()
 	LogMessage(TEXT("[预览] 已将求解外参应用到左侧预览相机，并叠加目标纹理（半透明）"));
 }
 
+void SPnPToolWidget::OnActorMoved(AActor* Actor)
+{
+	if (!m_bAutoSolve || !Actor) return;
+
+	// 更新该 Actor 对应的 3D 点位置，并触发自动求解
+	for (FPair& P : m_Pairs)
+	{
+		if (P.SourceActor.Get() == Actor)
+		{
+			P.Point3D = Actor->GetActorLocation();
+			break;
+		}
+	}
+
+	// 检查满足条件的点对数量
+	int32 Completed = 0;
+	for (const FPair& P : m_Pairs)
+	{
+		if (P.bHas2D) ++Completed;
+	}
+	if (Completed >= 4)
+	{
+		DoSolve();
+	}
+}
+
 FReply SPnPToolWidget::OnSolveClicked()
 {
 	DoSolve();
@@ -1698,20 +1731,23 @@ void SPnPToolWidget::Tick(const FGeometry& AllottedGeometry, const double InCurr
 		}
 	}
 
-	// 3D 点实时跟随 Actor 位置（行文本通过 TAttribute 自动刷新）
+	// 3D 点实时跟随 Actor 位置，并触发自动求解（仅当位置实际变化时）
 	// 注意：左侧预览捕获 UpdateLeftPreviewCapture/UpdateLeftOverlaySize 只在
 	// ApplySolvedPoseToPreview 中调用，不在 Tick 中持续执行
+	bool bNeedSolve = false;
 	for (FPair& P : m_Pairs)
 	{
 		if (AActor* A = P.SourceActor.Get())
 		{
 			const FVector Cur = A->GetActorLocation();
-			if (!Cur.Equals(P.Point3D, 0.5f)) P.Point3D = Cur;
+			if (!Cur.Equals(P.Point3D, 0.5f))
+			{
+				P.Point3D = Cur;
+				bNeedSolve = true;
+			}
 		}
 	}
-
-	// 自动求解：4 组以上完整点对且开启自动求解
-	if (m_bAutoSolve)
+	if (bNeedSolve && m_bAutoSolve)
 	{
 		int32 Completed = 0;
 		for (const FPair& P : m_Pairs)
@@ -1720,7 +1756,6 @@ void SPnPToolWidget::Tick(const FGeometry& AllottedGeometry, const double InCurr
 		}
 		if (Completed >= 4)
 		{
-			// 直接调用求解逻辑（不返回 FReply）
 			DoSolve();
 		}
 	}

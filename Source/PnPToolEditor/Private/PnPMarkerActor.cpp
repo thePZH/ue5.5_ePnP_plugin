@@ -13,7 +13,9 @@ APnPMarkerActor::APnPMarkerActor(const FObjectInitializer& ObjectInitializer)
 	MarkerMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("MarkerMesh"));
 	RootComponent = MarkerMesh;
 	MarkerMesh->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
-
+	MarkerMesh->SetCastShadow(false);
+	MarkerMesh->SetIsReplicated(false);
+	
 	// 默认使用引擎内建球体网格体，开箱即用
 	static ConstructorHelpers::FObjectFinder<UStaticMesh> SphereMeshFinder(TEXT("/Engine/BasicShapes/Sphere.Sphere"));
 	if (SphereMeshFinder.Succeeded())

@@ -399,20 +399,28 @@ TSharedRef<SWidget> SPnPToolWidget::BuildInputPanel()
 							.HintText(LOCTEXT("MatParamHint", "如 Color / BaseColor"))
 						]
 					]
-					+ SVerticalBox::Slot().AutoHeight().Padding(0, 4, 0, 2)
+					+ SVerticalBox::Slot().AutoHeight().Padding(0, 4, 0, 0)
+					[
+						SNew(STextBlock)
+						.Text(LOCTEXT("PairManagementHeader", "配对管理"))
+						.Font(FCoreStyle::GetDefaultFontStyle("Bold", 9))
+						.ColorAndOpacity(FLinearColor::Gray)
+					]
+					+ SVerticalBox::Slot().AutoHeight().Padding(0, 2, 0, 2)
 					[
 						SNew(SHorizontalBox)
 						+ SHorizontalBox::Slot().FillWidth(1.0f).Padding(2)
 						[
 							SNew(SButton)
-							.Text(LOCTEXT("Add3DBtn", "添加3D点（来自选中Actor）"))
-							.OnClicked(this, &SPnPToolWidget::OnAdd3DPointClicked)
+							.Text(LOCTEXT("AddEmptyPairBtn", " + "))
+							.ToolTipText(LOCTEXT("AddEmptyPairTip", "创建一个空配对，可在列表中填入 Actor 对象"))
+							.OnClicked(this, &SPnPToolWidget::OnAddEmptyPairClicked)
 						]
 						+ SHorizontalBox::Slot().FillWidth(1.0f).Padding(2)
 						[
 							SNew(SButton)
-							.Text(LOCTEXT("CancelEditBtn", "取消编辑"))
-							.OnClicked(this, &SPnPToolWidget::OnCancelEditClicked)
+							.Text(LOCTEXT("Add3DBtn", "批量加入"))
+							.OnClicked(this, &SPnPToolWidget::OnAdd3DPointClicked)
 						]
 						+ SHorizontalBox::Slot().FillWidth(1.0f).Padding(2)
 						[
@@ -420,10 +428,35 @@ TSharedRef<SWidget> SPnPToolWidget::BuildInputPanel()
 							.Text(LOCTEXT("ClearAllBtn", "清除所有"))
 							.OnClicked(this, &SPnPToolWidget::OnClearAllClicked)
 						]
+					]
+					+ SVerticalBox::Slot().AutoHeight().Padding(0, 4, 0, 0)
+					[
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot().FillWidth(1.0f)
+						[
+							SNew(SBorder)
+							.Padding(0)
+							.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+							.BorderBackgroundColor(FLinearColor(0.2f, 0.2f, 0.2f, 0.3f))
+							[
+								SNew(SBox).HeightOverride(1)
+							]
+						]
+					]
+					+ SVerticalBox::Slot().AutoHeight().Padding(0, 2, 0, 2)
+					[
+						SNew(SHorizontalBox)
 						+ SHorizontalBox::Slot().FillWidth(1.0f).Padding(2)
 						[
 							SNew(SButton)
-							.Text(LOCTEXT("RecreateMakersBtn", "重新生成Maker"))
+							.Text(LOCTEXT("CancelEditBtn", "取消编辑(2D)"))
+							.OnClicked(this, &SPnPToolWidget::OnCancelEditClicked)
+						]
+						+ SHorizontalBox::Slot().FillWidth(1.0f).Padding(2)
+						[
+							SNew(SButton)
+							.Text(LOCTEXT("RecreateMakersBtn", "创建Marker"))
+							.ToolTipText(LOCTEXT("RecreateMakersTip", "无配对时在原点新建；已存在的跳过；误删的恢复"))
 							.OnClicked(this, &SPnPToolWidget::OnRecreateMakersClicked)
 						]
 					]
@@ -534,17 +567,17 @@ void SPnPToolWidget::EnsureSceneCapture()
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 	m_DebugSceneCapture = World->SpawnActor<ASceneCapture2D>(ASceneCapture2D::StaticClass(), FTransform::Identity, Params);
 
-	if (ASceneCapture2D* Cap = m_DebugSceneCapture.Get())
-	{
-		Cap->SetIsTemporarilyHiddenInEditor(true);
-		if (USceneCaptureComponent2D* Comp = Cap->GetCaptureComponent2D())
-		{
-			Comp->TextureTarget = m_DebugRT.Get();
-			Comp->bCaptureEveryFrame = true;
-			Comp->bCaptureOnMovement = false;
-			Comp->CaptureSource = ESceneCaptureSource::SCS_FinalColorLDR;
-		}
-	}
+    if (ASceneCapture2D* Cap = m_DebugSceneCapture.Get())
+    {
+        Cap->SetIsTemporarilyHiddenInEditor(true);
+        if (USceneCaptureComponent2D* Comp = Cap->GetCaptureComponent2D())
+        {
+            Comp->TextureTarget = m_DebugRT.Get();
+            Comp->bCaptureEveryFrame = true;
+            Comp->bCaptureOnMovement = false;
+            Comp->CaptureSource = ESceneCaptureSource::SCS_FinalColorHDR;
+        }
+    }
 }
 
 void SPnPToolWidget::UpdateLeftPreviewCapture()
@@ -828,9 +861,17 @@ FReply SPnPToolWidget::OnAdd3DPointClicked()
 
 	int32 Added = 0;
 	int32 Skipped = 0;
+	int32 WrongType = 0;
 	for (AActor* Actor : Selected)
 	{
 		if (!Actor) continue;
+
+		// 只允许 APnPMarkerActor 类型的 Actor
+		if (!Actor->IsA<APnPMarkerActor>())
+		{
+			++WrongType;
+			continue;
+		}
 
 		// 重复性检测：已有相同 SourceActor 的 pair 不重复添加
 		bool bAlreadyExists = false;
@@ -861,7 +902,9 @@ FReply SPnPToolWidget::OnAdd3DPointClicked()
 
 	RebuildPairsList();
 	RebuildRTMarkers();
-	LogMessage(FString::Printf(TEXT("[3D] 已添加 %d 个点（跳过 %d 个重复）"), Added, Skipped));
+	FString Msg = FString::Printf(TEXT("[3D] 已添加 %d 个点（跳过 %d 个重复）"), Added, Skipped);
+	if (WrongType > 0) Msg += FString::Printf(TEXT("，%d 个非 APnPMarkerActor 被忽略"), WrongType);
+	LogMessage(Msg);
 	return FReply::Handled();
 }
 
@@ -928,12 +971,39 @@ FReply SPnPToolWidget::OnRecreateMakersClicked()
 	UWorld* World = GEditor->GetEditorWorldContext().World();
 	if (!World) return FReply::Handled();
 
+	// 情况1：无配对 → 在原点创建默认 Maker 并新增配对
+	if (m_Pairs.Num() == 0)
+	{
+		FActorSpawnParameters Params;
+		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		APnPMarkerActor* NewMarker = World->SpawnActor<APnPMarkerActor>(APnPMarkerActor::StaticClass(), FVector::ZeroVector, FRotator::ZeroRotator, Params);
+		if (!NewMarker) return FReply::Handled();
+
+		NewMarker->SetActorLabel(TEXT("PnPMarker_0"));
+		FPair P;
+		P.Id = m_NextPairId++;
+		P.Color = GetPaletteColor(P.Id);
+		P.SourceActor = NewMarker;
+		P.Point3D = FVector::ZeroVector;
+		P.bHas2D = false;
+		m_Pairs.Add(MoveTemp(P));
+		ApplyColorToActor(NewMarker, m_Pairs.Last().Color);
+		RebuildPairsList();
+		RebuildRTMarkers();
+		LogMessage(TEXT("[重新生成] 无配对，已在原点创建默认 Maker 并添加配对"));
+		return FReply::Handled();
+	}
+
+	// 情况2：已有配对 → 跳过已存在的，恢复误删的
 	int32 Recreated = 0;
+	int32 Skipped = 0;
 	for (FPair& P : m_Pairs)
 	{
-		if (P.SourceActor.IsValid()) continue;
-		// 尝试在世界中按名字查找已丢失的 Actor
-		// 由于我们不知道原 Actor 的类，使用 APnPMarkerActor 类型
+		if (P.SourceActor.IsValid())
+		{
+			++Skipped;
+			continue;
+		}
 		FActorSpawnParameters Params;
 		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 		APnPMarkerActor* NewMarker = World->SpawnActor<APnPMarkerActor>(APnPMarkerActor::StaticClass(), P.Point3D, FRotator::ZeroRotator, Params);
@@ -949,12 +1019,33 @@ FReply SPnPToolWidget::OnRecreateMakersClicked()
 	if (Recreated > 0)
 	{
 		RebuildPairsList();
-		LogMessage(FString::Printf(TEXT("[重新生成] 已重新创建 %d 个丢失的 Maker Actor"), Recreated));
+		LogMessage(FString::Printf(TEXT("[重新生成] 已恢复 %d 个误删的 Maker，%d 个已存在跳过"), Recreated, Skipped));
 	}
 	else
 	{
-		LogMessage(TEXT("[重新生成] 没有丢失的 Maker 需要重新创建"));
+		LogMessage(FString::Printf(TEXT("[重新生成] 所有 %d 个配对均有有效 Actor，无需创建"), Skipped));
 	}
+	return FReply::Handled();
+}
+
+FReply SPnPToolWidget::OnAddEmptyPairClicked()
+{
+	// 退出 2D 编辑
+	m_ActivePairIndex = INDEX_NONE;
+	m_InputMode = EInputMode::Idle;
+	m_bTargetShowCurCrosshair = false;
+
+	FPair P;
+	P.Id = m_NextPairId++;
+	P.Color = GetPaletteColor(P.Id);
+	P.SourceActor = nullptr;
+	P.Point3D = FVector::ZeroVector;
+	P.bHas2D = false;
+	m_Pairs.Add(MoveTemp(P));
+
+	RebuildPairsList();
+	RebuildRTMarkers();
+	LogMessage(FString::Printf(TEXT("[新增] 已创建空配对 #%d，可在列表中填入 Actor 对象"), P.Id));
 	return FReply::Handled();
 }
 
@@ -1054,7 +1145,7 @@ void SPnPToolWidget::RebuildPairsList()
 		m_PairsListContainer->AddSlot().AutoHeight().Padding(2)
 		[
 			SNew(STextBlock)
-			.Text(FText::FromString(TEXT("（无配对。在场景选中球体 Actor 后点'添加3D点'）")))
+			.Text(FText::FromString(TEXT("目前无配对")))
 			.ColorAndOpacity(FLinearColor::Gray)
 		];
 		return;
@@ -1075,14 +1166,14 @@ void SPnPToolWidget::RebuildPairsList()
 		}))
 			[
 				SNew(SHorizontalBox)
-				// 首列：Actor 对象引用 + 选择按钮
-				+ SHorizontalBox::Slot().FillWidth(1.5f).Padding(2).VAlign(VAlign_Center)
+				// 首列：Actor 对象引用 + 选择按钮（扩大占比以显示完整对象名）
+				+ SHorizontalBox::Slot().FillWidth(2.5f).Padding(2).VAlign(VAlign_Center)
 				[
 					SNew(SHorizontalBox)
 					+ SHorizontalBox::Slot().FillWidth(3.0f)
 					[
 						SNew(SObjectPropertyEntryBox)
-						.AllowedClass(AActor::StaticClass())
+						.AllowedClass(APnPMarkerActor::StaticClass())
 						.ObjectPath_Lambda([this, CapturedIdx]() -> FString
 						{
 							if (!m_Pairs.IsValidIndex(CapturedIdx)) return FString();
@@ -1093,13 +1184,17 @@ void SPnPToolWidget::RebuildPairsList()
 						{
 							if (!m_Pairs.IsValidIndex(CapturedIdx)) return;
 							AActor* NewActor = Cast<AActor>(AssetData.GetAsset());
-							if (NewActor)
+							if (NewActor && NewActor->IsA<APnPMarkerActor>())
 							{
 								FPair& P = m_Pairs[CapturedIdx];
 								P.SourceActor = NewActor;
 								P.Point3D = NewActor->GetActorLocation();
 								ApplyColorToActor(NewActor, P.Color);
 								RebuildRTMarkers();
+							}
+							else if (NewActor)
+							{
+								LogMessage(FString::Printf(TEXT("[提示] 只允许 APnPMarkerActor 类型，已忽略 \"%s\""), *NewActor->GetActorNameOrLabel()));
 							}
 						})
 						.DisplayUseSelected(true)

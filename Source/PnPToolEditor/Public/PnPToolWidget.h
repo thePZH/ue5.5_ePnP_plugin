@@ -107,6 +107,7 @@ private:
 
 	// 配对管理
 	FReply OnAdd3DPointClicked();            // 读取编辑器选中 Actor
+	FReply OnAddEmptyPairClicked();          // 新增空配对
 	FReply OnEdit2DClicked(int32 Index);     // 进入某 pair 的 2D 编辑
 	FReply OnDeletePairClicked(int32 Index);
 	FReply OnCancelEditClicked();

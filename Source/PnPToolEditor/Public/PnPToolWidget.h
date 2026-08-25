@@ -92,8 +92,8 @@ private:
 	int32  GetResH() const { return m_TargetTexRes.Y; }
 	void   SetResH(int32 V) { m_TargetTexRes.Y = V; }
 	// 内参辅助计算
-	double  GetHelperFOV() const { return m_HelperFOV; }
-	void    SetHelperFOV(double V) { m_HelperFOV = FMath::Clamp(V, 0.1, 179.9); }
+	double  GetHelperFOV() const { return m_InputRTFov; }
+	void    SetHelperFOV(double V) { m_InputRTFov = FMath::Clamp(V, 0.1, 179.9); }
 	FReply  OnApplyTexSizeClicked();    // 用目标纹理尺寸设置 Resolution / cx / cy
 	FReply  OnComputeFxFyFromFOVClicked(); // 用水平 FOV 计算 fx=fy（基于当前 Resolution）
 
@@ -113,6 +113,8 @@ private:
 	FReply OnCancelEditClicked();
 	FReply OnClearAllClicked();
 	FReply OnRecreateMakersClicked();        // 重新生成缺失的 Maker Actor
+	AActor* SpawnMarkerActor(UWorld* World, const FVector& Location, const FString& Label = FString()) const; // 优先 BP_Marker，兜底 APnPMarkerActor
+	void   DestroyAllMarkers();              // 销毁所有配对关联的 Actor
 	void   SetPairColor(int32 Id, FLinearColor NewColor);
 	void   OpenColorPickerForPair(int32 Index);
 	FLinearColor GetPaletteColor(int32 Index) const;
@@ -123,12 +125,12 @@ private:
 	void  SetMaterialColorParamName(const FText& InName);
 
 	// 叠加层不透明度
-	float  GetOverlayOpacity() const { return m_OverlayOpacity; }
-	void   SetOverlayOpacity(float V);
+	float  GetOverlayImageOpacity() const { return m_DebugOverlayOpacity; }
+	void   SetOverlayImageOpacity(float V);
 
 	// 叠加层放大倍率（>1.0 时 SceneCapture 的 FOV 更宽，RT 可视范围更大，叠加纹理保持原始内参 FOV 只覆盖中心区域）
-	float  GetOverlayScale() const { return m_OverlayScale; }
-	void   SetOverlayScale(float V) { m_OverlayScale = FMath::Clamp(V, 0.5f, 3.0f); UpdateLeftPreviewCapture(); UpdateLeftOverlaySize(); }
+	float  GetDebugRTFovScale() const { return m_DebugFOVScale; }
+	void   SetDebugRTFovScale(float V) { m_DebugFOVScale = FMath::Clamp(V, 1.f, 1.6f); UpdateLeftPreviewCapture();}
 
 	void RebuildPairsList();
 	void RebuildRTMarkers();   // 重建右侧纹理视口的标记点 widget（结构变化时调用）
@@ -147,6 +149,12 @@ private:
 	// 通过纹理槽位矩形将 Canvas 屏幕坐标 ↔ 视觉像素坐标互转
 	FVector2D ScreenToVisualPixel(const FVector2D& CanvasPos) const;
 	FVector2D VisualPixelToScreen(const FVector2D& VisPixel) const;
+
+	// 序列化（保存/加载会话）
+	FReply OnSaveSessionClicked();
+	FReply OnLoadSessionClicked();
+	FString SerializeToJson() const;
+	bool DeserializeFromJson(const FString& JsonStr);
 
 	// 求解
 	FReply OnSolveClicked();
@@ -170,9 +178,12 @@ private:
 	TSharedPtr<SImage> m_DebugImage;
 	TSharedPtr<SBox> m_DebugContainerBox;
 	TSharedPtr<SImage> m_DebugOverlayImage;
+	float m_DebugOverlayOpacity = 0.5f;  // 目标纹理叠加不透明度
 	FSlateBrush m_DebugOverlayBrush;
 	TSharedPtr<SBox> m_DebugOverlayBox;
 	bool m_bDebugPoseLocked = false;
+	float m_DebugFOVScale = 1.2f;    // SceneCapture FOV 放大倍率（>1 RT 可视范围更大，叠加纹理保持原始内参 FOV 只覆盖中心区域）
+
 
 	// 目标纹理 + 右侧视口
 	TWeakObjectPtr<UTexture2D> m_TargetTexture;
@@ -214,7 +225,7 @@ private:
 	double m_Cx = 960.0;
 	double m_Cy = 540.0;
 	FIntPoint m_TargetTexRes = FIntPoint(1920, 1080);
-	double m_HelperFOV = 90.0;      // 辅助：计算 fx/fy 时使用的水平 FOV（度）
+	double m_InputRTFov = 90.0;      // 辅助：计算 fx/fy 时使用的水平 FOV（度）
 
 	// 求解结果
 	FTransform m_SolvedPose;
@@ -223,12 +234,9 @@ private:
 	double m_RotationError = -1.0;
 	bool m_bLastSolveSuccess = false;
 	bool m_bAutoSolve = false;   // 自动求解（委托触发，不在 Tick 中轮询）
+	bool m_bPendingOverlayUpdate = false; // 延迟刷新叠加层布局（加载会话时使用）
 	FDelegateHandle m_ActorMovedHandle;  // GEditor->OnActorMoved 委托句柄
 
 	// 材质颜色参数名（用于修改场景中 Actor 的材质颜色）
 	FName m_MaterialColorParamName = FName("Color");
-
-	// 叠加层参数
-	float m_OverlayOpacity = 0.5f;  // 目标纹理叠加不透明度
-	float m_OverlayScale = 1.2f;    // SceneCapture FOV 放大倍率（>1 RT 可视范围更大，叠加纹理保持原始内参 FOV 只覆盖中心区域）
 };

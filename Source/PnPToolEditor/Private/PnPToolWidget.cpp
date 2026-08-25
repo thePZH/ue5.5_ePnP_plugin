@@ -41,6 +41,13 @@
 #include "Widgets/Text/SMultiLineEditableText.h"
 #include "Widgets/Input/SEditableTextBox.h"
 #include "RenderingThread.h"
+#include "Serialization/JsonWriter.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
+#include "DesktopPlatformModule.h"
+#include "IDesktopPlatform.h"
 
 #define LOCTEXT_NAMESPACE "PnPToolWidget"
 
@@ -206,7 +213,7 @@ TSharedRef<SWidget> SPnPToolWidget::BuildScenePreviewPanel()
 				]
 				+ SHorizontalBox::Slot().FillWidth(1.0f)
 				[
-					SNew(SSpinBox<float>).Value(this, &SPnPToolWidget::GetOverlayOpacity).OnValueChanged(this, &SPnPToolWidget::SetOverlayOpacity)
+					SNew(SSpinBox<float>).Value(this, &SPnPToolWidget::GetOverlayImageOpacity).OnValueChanged(this, &SPnPToolWidget::SetOverlayImageOpacity)
 					.MinValue(0.0f).MaxValue(1.0f).Delta(0.05f)
 				]
 				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(6, 0, 6, 0)
@@ -215,8 +222,8 @@ TSharedRef<SWidget> SPnPToolWidget::BuildScenePreviewPanel()
 				]
 				+ SHorizontalBox::Slot().FillWidth(1.0f)
 				[
-					SNew(SSpinBox<float>).Value(this, &SPnPToolWidget::GetOverlayScale).OnValueChanged(this, &SPnPToolWidget::SetOverlayScale)
-					.MinValue(0.5f).MaxValue(3.0f).Delta(0.05f)
+					SNew(SSpinBox<float>).Value(this, &SPnPToolWidget::GetDebugRTFovScale).OnValueChanged(this, &SPnPToolWidget::SetDebugRTFovScale)
+					.MinValue(1.f).MaxValue(1.6f).Delta(0.05f)
 				]
 			]
 			+ SVerticalBox::Slot().FillHeight(1.0f)
@@ -460,6 +467,24 @@ TSharedRef<SWidget> SPnPToolWidget::BuildInputPanel()
 							.OnClicked(this, &SPnPToolWidget::OnRecreateMakersClicked)
 						]
 					]
+					+ SVerticalBox::Slot().AutoHeight().Padding(0, 2, 0, 2)
+					[
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot().FillWidth(1.0f).Padding(2)
+						[
+							SNew(SButton)
+							.Text(LOCTEXT("SaveSessionBtn", "保存会话"))
+							.ToolTipText(LOCTEXT("SaveSessionTip", "将当前配对、纹理、内参和外参保存到文件"))
+							.OnClicked(this, &SPnPToolWidget::OnSaveSessionClicked)
+						]
+						+ SHorizontalBox::Slot().FillWidth(1.0f).Padding(2)
+						[
+							SNew(SButton)
+							.Text(LOCTEXT("LoadSessionBtn", "加载会话"))
+							.ToolTipText(LOCTEXT("LoadSessionTip", "从文件恢复配对、纹理、内参和外参"))
+							.OnClicked(this, &SPnPToolWidget::OnLoadSessionClicked)
+						]
+					]
 				]
 			]
 
@@ -595,7 +620,7 @@ void SPnPToolWidget::UpdateLeftPreviewCapture()
 		const double FOVh = 2.0 * FMath::Atan(static_cast<double>(m_TargetTexRes.X) / (2.0 * m_Fx));
 
 		// 放大倍率：RT 的 FOV 和分辨率都按此倍数放大
-		const double S = FMath::Max(0.5, static_cast<double>(m_OverlayScale));
+		const double S = FMath::Max(1.0f, static_cast<double>(m_DebugFOVScale));
 		const int32 RTW = FMath::CeilToInt(static_cast<double>(m_TargetTexRes.X) * S);
 		const int32 RTH = FMath::CeilToInt(static_cast<double>(m_TargetTexRes.Y) * S);
 
@@ -637,6 +662,7 @@ void SPnPToolWidget::UpdateLeftPreviewCapture()
 			Comp->FOVAngle = VPC->ViewFOV;
 		}
 	}
+	UpdateLeftOverlaySize();
 }
 
 void SPnPToolWidget::UpdateLeftOverlaySize()
@@ -665,27 +691,21 @@ void SPnPToolWidget::UpdateLeftOverlaySize()
 	FVector2D OverlaySize;
 	if (ContainerAspect > TexAspect)
 	{
-		// 容器更宽 → 高度撑满，宽度按比例
 		OverlaySize.Y = SceneSize.Y;
 		OverlaySize.X = SceneSize.Y * TexAspect;
 	}
 	else
 	{
-		// 容器更高 → 宽度撑满，高度按比例
 		OverlaySize.X = SceneSize.X;
 		OverlaySize.Y = SceneSize.X / TexAspect;
 	}
 
-	// 叠加放大倍率：>1.0 时 RT 的 FOV 更宽，SceneCapture 的可视范围更大
-	// 叠加纹理保持原始内参 FOV，尺寸除以倍率使其只覆盖中心区域
-	const float S = FMath::Max(0.5f, m_OverlayScale);
+	const float S = FMath::Max(1.0f, m_DebugFOVScale);
 	m_DebugOverlayBox->SetWidthOverride(OverlaySize.X / S);
 	m_DebugOverlayBox->SetHeightOverride(OverlaySize.Y / S);
 
-	// 画刷保持纹理原始尺寸，SImage 按 SBox 尺寸缩放（不拉伸）
 	m_DebugOverlayBrush.ImageSize = FVector2D(TexW, TexH);
-	// 同步不透明度
-	m_DebugOverlayBrush.TintColor = FSlateColor(FLinearColor(1, 1, 1, m_OverlayOpacity));
+	m_DebugOverlayBrush.TintColor = FSlateColor(FLinearColor(1, 1, 1, m_DebugOverlayOpacity));
 }
 
 FOptionalSize SPnPToolWidget::GetSceneAspectRatio() const
@@ -807,7 +827,7 @@ FReply SPnPToolWidget::OnComputeFxFyFromFOVClicked()
 		LogMessage(TEXT("[提示] 请先设置 Resolution.Width"));
 		return FReply::Handled();
 	}
-	const double HalfFOV_rad = m_HelperFOV * (PI / 180.0) * 0.5;
+	const double HalfFOV_rad = m_InputRTFov * (PI / 180.0) * 0.5;
 	const double TanHalf = FMath::Tan(HalfFOV_rad);
 	if (TanHalf <= KINDA_SMALL_NUMBER)
 	{
@@ -818,7 +838,7 @@ FReply SPnPToolWidget::OnComputeFxFyFromFOVClicked()
 	// 对于渲染相机，像素方形 → fx ≈ fy
 	m_Fx = static_cast<double>(m_TargetTexRes.X) * 0.5 / TanHalf;
 	m_Fy = m_Fx;
-	LogMessage(FString::Printf(TEXT("[内参] 水平FOV=%.2f° → fx=fy=%.3f (基于ResW=%d)"), m_HelperFOV, m_Fx, m_TargetTexRes.X));
+	LogMessage(FString::Printf(TEXT("[内参] 水平FOV=%.2f° → fx=fy=%.3f (基于ResW=%d)"), m_InputRTFov, m_Fx, m_TargetTexRes.X));
 	return FReply::Handled();
 }
 
@@ -949,8 +969,28 @@ FReply SPnPToolWidget::OnCancelEditClicked()
 	return FReply::Handled();
 }
 
+void SPnPToolWidget::DestroyAllMarkers()
+{
+	UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+	if (!World) return;
+
+	for (const FPair& P : m_Pairs)
+	{
+		if (AActor* Actor = P.SourceActor.Get())
+		{
+			// 只销毁 PnPMarkerActor 类型（及其蓝图派生类），避免误删用户场景中的其他 Actor
+			if (Actor->IsA<APnPMarkerActor>())
+			{
+				World->DestroyActor(Actor);
+			}
+		}
+	}
+}
+
 FReply SPnPToolWidget::OnClearAllClicked()
 {
+	// 先销毁所有 Maker Actor
+	DestroyAllMarkers();
 	m_Pairs.Empty();
 	m_NextPairId = 0;
 	m_ActivePairIndex = INDEX_NONE;
@@ -965,6 +1005,32 @@ FReply SPnPToolWidget::OnClearAllClicked()
 	return FReply::Handled();
 }
 
+// =========================================================================
+// 配对管理
+// =========================================================================
+
+AActor* SPnPToolWidget::SpawnMarkerActor(UWorld* World, const FVector& Location, const FString& Label) const
+{
+	if (!World) return nullptr;
+
+	// 优先尝试加载插件 Content 中的 BP_Marker 蓝图类
+	UClass* BpClass = LoadClass<AActor>(nullptr, TEXT("/PnPTool/BP_Marker.BP_Marker_C"));
+	if (!BpClass)
+	{
+		// 兜底使用 C++ 基类（带默认 Sphere Mesh）
+		BpClass = APnPMarkerActor::StaticClass();
+	}
+
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	AActor* NewActor = World->SpawnActor<AActor>(BpClass, Location, FRotator::ZeroRotator, Params);
+	if (NewActor && !Label.IsEmpty())
+	{
+		NewActor->SetActorLabel(Label);
+	}
+	return NewActor;
+}
+
 FReply SPnPToolWidget::OnRecreateMakersClicked()
 {
 	if (!GEditor) return FReply::Handled();
@@ -974,12 +1040,8 @@ FReply SPnPToolWidget::OnRecreateMakersClicked()
 	// 情况1：无配对 → 在原点创建默认 Maker 并新增配对
 	if (m_Pairs.Num() == 0)
 	{
-		FActorSpawnParameters Params;
-		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-		APnPMarkerActor* NewMarker = World->SpawnActor<APnPMarkerActor>(APnPMarkerActor::StaticClass(), FVector::ZeroVector, FRotator::ZeroRotator, Params);
+		AActor* NewMarker = SpawnMarkerActor(World, FVector::ZeroVector, TEXT("PnPMarker_0"));
 		if (!NewMarker) return FReply::Handled();
-
-		NewMarker->SetActorLabel(TEXT("PnPMarker_0"));
 		FPair P;
 		P.Id = m_NextPairId++;
 		P.Color = GetPaletteColor(P.Id);
@@ -1004,12 +1066,9 @@ FReply SPnPToolWidget::OnRecreateMakersClicked()
 			++Skipped;
 			continue;
 		}
-		FActorSpawnParameters Params;
-		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-		APnPMarkerActor* NewMarker = World->SpawnActor<APnPMarkerActor>(APnPMarkerActor::StaticClass(), P.Point3D, FRotator::ZeroRotator, Params);
+		AActor* NewMarker = SpawnMarkerActor(World, P.Point3D, FString::Printf(TEXT("PnPMarker_%d"), P.Id));
 		if (NewMarker)
 		{
-			NewMarker->SetActorLabel(FString::Printf(TEXT("PnPMarker_%d"), P.Id));
 			P.SourceActor = NewMarker;
 			ApplyColorToActor(NewMarker, P.Color);
 			++Recreated;
@@ -1110,11 +1169,10 @@ void SPnPToolWidget::SetMaterialColorParamName(const FText& InName)
 	LogMessage(FString::Printf(TEXT("[材质] 颜色参数名已更新为 '%s'，已重新应用到所有 Actor"), *m_MaterialColorParamName.ToString()));
 }
 
-void SPnPToolWidget::SetOverlayOpacity(float V)
+void SPnPToolWidget::SetOverlayImageOpacity(float V)
 {
-	m_OverlayOpacity = FMath::Clamp(V, 0.0f, 1.0f);
-	// 更新画刷透明度，叠加层在 BuildScenePreviewPanel 中初始为 0.5f 半透明
-	m_DebugOverlayBrush.TintColor = FSlateColor(FLinearColor(1, 1, 1, m_OverlayOpacity));
+	m_DebugOverlayOpacity = FMath::Clamp(V, 0.0f, 1.0f);
+	m_DebugOverlayBrush.TintColor = FSlateColor(FLinearColor(1, 1, 1, m_DebugOverlayOpacity));
 	if (m_DebugOverlayImage.IsValid())
 	{
 		m_DebugOverlayImage->Invalidate(EInvalidateWidgetReason::Paint);
@@ -1689,7 +1747,7 @@ void SPnPToolWidget::ApplySolvedPoseToPreview()
 	m_bDebugPoseLocked = true;
 	m_DebugOverlayBrush.SetResourceObject(m_TargetTexture.Get());
 	m_DebugOverlayBrush.DrawAs = m_TargetTexture.IsValid() ? ESlateBrushDrawType::Image : ESlateBrushDrawType::NoDrawType;
-	m_DebugOverlayBrush.TintColor = FSlateColor(FLinearColor(1, 1, 1, 0.5f));
+	m_DebugOverlayBrush.TintColor = FSlateColor(FLinearColor(1, 1, 1, m_DebugOverlayOpacity));
 	UpdateLeftPreviewCapture();
 	UpdateLeftOverlaySize();
 	LogMessage(TEXT("[预览] 已将求解外参应用到左侧预览相机，并叠加目标纹理（半透明）"));
@@ -1811,6 +1869,22 @@ void SPnPToolWidget::Tick(const FGeometry& AllottedGeometry, const double InCurr
 {
 	EnsureSceneCapture();
 
+	// 延迟刷新叠加层布局（用于加载会话后，此时 Slate 布局已完成）
+	if (m_bPendingOverlayUpdate)
+	{
+		m_bPendingOverlayUpdate = false;
+		// 如果已经锁定了且求解成功，重新应用预览（更新叠加层布局）
+		if (m_bDebugPoseLocked && m_bLastSolveSuccess)
+		{
+			UpdateLeftOverlaySize();
+		}
+		else
+		{
+			// 尝试显示叠加层（如果条件满足）
+			UpdateLeftOverlaySize();
+		}
+	}
+
 	// 未锁定/未求解时，RT 尺寸跟随目标纹理分辨率
 	if (!m_bDebugPoseLocked || !m_bLastSolveSuccess)
 	{
@@ -1856,6 +1930,382 @@ void SPnPToolWidget::Tick(const FGeometry& AllottedGeometry, const double InCurr
 	}
 
 	UpdateMessages();
+}
+
+// =========================================================================
+// 序列化
+// =========================================================================
+
+FString SPnPToolWidget::SerializeToJson() const
+{
+	TSharedPtr<FJsonObject> Root = MakeShareable(new FJsonObject());
+	Root->SetNumberField(TEXT("version"), 1);
+
+	// 内参
+	TSharedPtr<FJsonObject> Intrinsics = MakeShareable(new FJsonObject());
+	Intrinsics->SetNumberField(TEXT("fx"), m_Fx);
+	Intrinsics->SetNumberField(TEXT("fy"), m_Fy);
+	Intrinsics->SetNumberField(TEXT("cx"), m_Cx);
+	Intrinsics->SetNumberField(TEXT("cy"), m_Cy);
+	Intrinsics->SetNumberField(TEXT("width"), m_TargetTexRes.X);
+	Intrinsics->SetNumberField(TEXT("height"), m_TargetTexRes.Y);
+	Intrinsics->SetNumberField(TEXT("helper_fov"), m_InputRTFov);
+	Root->SetObjectField(TEXT("intrinsics"), Intrinsics);
+
+	// 外参（求解结果）
+	TSharedPtr<FJsonObject> Extrinsics = MakeShareable(new FJsonObject());
+	Extrinsics->SetBoolField(TEXT("has_solution"), m_bLastSolveSuccess);
+	if (m_bLastSolveSuccess)
+	{
+		const FVector L = m_SolvedPose.GetLocation();
+		const FRotator R = m_SolvedPose.Rotator();
+		Extrinsics->SetArrayField(TEXT("location"), {
+			MakeShareable(new FJsonValueNumber(L.X)),
+			MakeShareable(new FJsonValueNumber(L.Y)),
+			MakeShareable(new FJsonValueNumber(L.Z))
+		});
+		Extrinsics->SetArrayField(TEXT("rotation"), {
+			MakeShareable(new FJsonValueNumber(R.Pitch)),
+			MakeShareable(new FJsonValueNumber(R.Yaw)),
+			MakeShareable(new FJsonValueNumber(R.Roll))
+		});
+		Extrinsics->SetNumberField(TEXT("reprojection_error"), m_ReprojectionError);
+		Extrinsics->SetNumberField(TEXT("translation_error"), m_TranslationError);
+		Extrinsics->SetNumberField(TEXT("rotation_error"), m_RotationError);
+	}
+	Root->SetObjectField(TEXT("extrinsics"), Extrinsics);
+
+	// 叠加层参数
+	TSharedPtr<FJsonObject> Overlay = MakeShareable(new FJsonObject());
+	Overlay->SetNumberField(TEXT("opacity"), m_DebugOverlayOpacity);
+	Overlay->SetNumberField(TEXT("scale"), m_DebugFOVScale);
+	Root->SetObjectField(TEXT("overlay"), Overlay);
+
+	// 目标纹理
+	TSharedPtr<FJsonObject> Texture = MakeShareable(new FJsonObject());
+	Texture->SetStringField(TEXT("path"), GetTargetTexturePath());
+	Root->SetObjectField(TEXT("texture"), Texture);
+
+	// 自动求解开关
+	Root->SetBoolField(TEXT("auto_solve"), m_bAutoSolve);
+
+	// 配对列表
+	TArray<TSharedPtr<FJsonValue>> PairsArray;
+	for (const FPair& P : m_Pairs)
+	{
+		TSharedPtr<FJsonObject> PairObj = MakeShareable(new FJsonObject());
+		PairObj->SetNumberField(TEXT("id"), P.Id);
+		PairObj->SetArrayField(TEXT("color"), {
+			MakeShareable(new FJsonValueNumber(P.Color.R)),
+			MakeShareable(new FJsonValueNumber(P.Color.G)),
+			MakeShareable(new FJsonValueNumber(P.Color.B)),
+			MakeShareable(new FJsonValueNumber(P.Color.A))
+		});
+		// Actor 路径
+		FString ActorPath;
+		if (AActor* A = P.SourceActor.Get())
+		{
+			ActorPath = A->GetPathName();
+		}
+		PairObj->SetStringField(TEXT("actor_path"), ActorPath);
+		// 3D 点
+		PairObj->SetArrayField(TEXT("point3d"), {
+			MakeShareable(new FJsonValueNumber(P.Point3D.X)),
+			MakeShareable(new FJsonValueNumber(P.Point3D.Y)),
+			MakeShareable(new FJsonValueNumber(P.Point3D.Z))
+		});
+		// 2D 点
+		PairObj->SetArrayField(TEXT("point2d"), {
+			MakeShareable(new FJsonValueNumber(P.Point2D.X)),
+			MakeShareable(new FJsonValueNumber(P.Point2D.Y))
+		});
+		PairObj->SetBoolField(TEXT("has_2d"), P.bHas2D);
+		PairsArray.Add(MakeShareable(new FJsonValueObject(PairObj)));
+	}
+	Root->SetArrayField(TEXT("pairs"), PairsArray);
+
+	// 序列化为字符串
+	FString JsonStr;
+	TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&JsonStr);
+	FJsonSerializer::Serialize(Root.ToSharedRef(), Writer);
+	return JsonStr;
+}
+
+bool SPnPToolWidget::DeserializeFromJson(const FString& JsonStr)
+{
+	TSharedPtr<FJsonObject> Root;
+	TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonStr);
+	if (!FJsonSerializer::Deserialize(Reader, Root) || !Root.IsValid())
+	{
+		LogMessage(TEXT("[错误] 无法解析会话 JSON 文件"));
+		return false;
+	}
+
+	// 版本检查
+	int32 Version = 1;
+	Root->TryGetNumberField(TEXT("version"), Version);
+	if (Version < 1)
+	{
+		LogMessage(TEXT("[错误] 不支持的会话版本"));
+		return false;
+	}
+
+	// --- 清除当前状态（包括销毁旧 Maker） ---
+	DestroyAllMarkers();
+	m_Pairs.Empty();
+	m_NextPairId = 0;
+	m_ActivePairIndex = INDEX_NONE;
+	m_InputMode = EInputMode::Idle;
+	m_bLastSolveSuccess = false;
+	m_bAutoSolve = false;
+
+	// --- 内参 ---
+	TSharedPtr<FJsonObject> Intrinsics = Root->GetObjectField(TEXT("intrinsics"));
+	if (Intrinsics.IsValid())
+	{
+		Intrinsics->TryGetNumberField(TEXT("fx"), m_Fx);
+		Intrinsics->TryGetNumberField(TEXT("fy"), m_Fy);
+		Intrinsics->TryGetNumberField(TEXT("cx"), m_Cx);
+		Intrinsics->TryGetNumberField(TEXT("cy"), m_Cy);
+		double W = m_TargetTexRes.X, H = m_TargetTexRes.Y;
+		Intrinsics->TryGetNumberField(TEXT("width"), W);
+		Intrinsics->TryGetNumberField(TEXT("height"), H);
+		m_TargetTexRes = FIntPoint((int32)W, (int32)H);
+		Intrinsics->TryGetNumberField(TEXT("helper_fov"), m_InputRTFov);
+	}
+
+	// --- 外参 ---
+	TSharedPtr<FJsonObject> Extrinsics = Root->GetObjectField(TEXT("extrinsics"));
+	if (Extrinsics.IsValid())
+	{
+		bool bHasSolution = false;
+		Extrinsics->TryGetBoolField(TEXT("has_solution"), bHasSolution);
+		if (bHasSolution)
+		{
+			TArray<TSharedPtr<FJsonValue>> LocArr = Extrinsics->GetArrayField(TEXT("location"));
+			TArray<TSharedPtr<FJsonValue>> RotArr = Extrinsics->GetArrayField(TEXT("rotation"));
+			if (LocArr.Num() == 3 && RotArr.Num() == 3)
+			{
+				FVector Loc(LocArr[0]->AsNumber(), LocArr[1]->AsNumber(), LocArr[2]->AsNumber());
+				FRotator Rot(RotArr[0]->AsNumber(), RotArr[1]->AsNumber(), RotArr[2]->AsNumber());
+				m_SolvedPose = FTransform(Rot, Loc);
+				m_bLastSolveSuccess = true;
+			}
+			Extrinsics->TryGetNumberField(TEXT("reprojection_error"), m_ReprojectionError);
+			Extrinsics->TryGetNumberField(TEXT("translation_error"), m_TranslationError);
+			Extrinsics->TryGetNumberField(TEXT("rotation_error"), m_RotationError);
+		}
+	}
+
+	// --- 叠加层参数 ---
+	TSharedPtr<FJsonObject> Overlay = Root->GetObjectField(TEXT("overlay"));
+	if (Overlay.IsValid())
+	{
+		double Opacity = m_DebugOverlayOpacity, Scale = m_DebugFOVScale;
+		Overlay->TryGetNumberField(TEXT("opacity"), Opacity);
+		Overlay->TryGetNumberField(TEXT("scale"), Scale);
+		// 使用 setter 确保副作用（更新画刷、场景捕获等）
+		SetOverlayImageOpacity((float)Opacity);
+		SetDebugRTFovScale((float)Scale);
+	}
+
+	// --- 目标纹理 ---
+	TSharedPtr<FJsonObject> Texture = Root->GetObjectField(TEXT("texture"));
+	if (Texture.IsValid())
+	{
+		FString TexPath;
+		Texture->TryGetStringField(TEXT("path"), TexPath);
+		if (!TexPath.IsEmpty())
+		{
+			// 尝试加载纹理资产
+			UTexture2D* LoadedTex = LoadObject<UTexture2D>(nullptr, *TexPath);
+			if (LoadedTex)
+			{
+				// 使用 FAssetData 模拟选择纹理
+				FAssetData AssetData(LoadedTex);
+				OnTargetTextureChanged(AssetData);
+				UpdateLeftOverlaySize();
+			}
+			else
+			{
+				LogMessage(FString::Printf(TEXT("[警告] 无法加载纹理: %s"), *TexPath));
+			}
+		}
+	}
+
+	// --- 自动求解 ---
+	Root->TryGetBoolField(TEXT("auto_solve"), m_bAutoSolve);
+
+	// --- 配对列表 ---
+	const TArray<TSharedPtr<FJsonValue>>* PairsArray = nullptr;
+	if (Root->TryGetArrayField(TEXT("pairs"), PairsArray))
+	{
+		m_Pairs.Reserve(PairsArray->Num());
+		int32 MaxId = 0;
+		for (const TSharedPtr<FJsonValue>& Val : *PairsArray)
+		{
+			TSharedPtr<FJsonObject> PairObj = Val->AsObject();
+			if (!PairObj.IsValid()) continue;
+
+			FPair P;
+			PairObj->TryGetNumberField(TEXT("id"), P.Id);
+
+			// 颜色
+			const TArray<TSharedPtr<FJsonValue>>* ColorArr = nullptr;
+			if (PairObj->TryGetArrayField(TEXT("color"), ColorArr) && ColorArr->Num() == 4)
+			{
+				P.Color = FLinearColor(
+					(*ColorArr)[0]->AsNumber(),
+					(*ColorArr)[1]->AsNumber(),
+					(*ColorArr)[2]->AsNumber(),
+					(*ColorArr)[3]->AsNumber()
+				);
+			}
+
+			// Actor 路径
+			FString ActorPath;
+			PairObj->TryGetStringField(TEXT("actor_path"), ActorPath);
+			if (!ActorPath.IsEmpty())
+			{
+				// 尝试在关卡中查找 Actor
+				AActor* FoundActor = FindObject<AActor>(nullptr, *ActorPath);
+				if (FoundActor)
+				{
+					P.SourceActor = FoundActor;
+					ApplyColorToActor(FoundActor, P.Color);
+				}
+				else
+				{
+					LogMessage(FString::Printf(TEXT("[提示] 未找到 Actor: %s（将被重新创建）"), *ActorPath));
+				}
+			}
+
+			// 3D 点
+			const TArray<TSharedPtr<FJsonValue>>* P3DArr = nullptr;
+			if (PairObj->TryGetArrayField(TEXT("point3d"), P3DArr) && P3DArr->Num() == 3)
+			{
+				P.Point3D = FVector(
+					(*P3DArr)[0]->AsNumber(),
+					(*P3DArr)[1]->AsNumber(),
+					(*P3DArr)[2]->AsNumber()
+				);
+			}
+
+			// 2D 点
+			const TArray<TSharedPtr<FJsonValue>>* P2DArr = nullptr;
+			if (PairObj->TryGetArrayField(TEXT("point2d"), P2DArr) && P2DArr->Num() == 2)
+			{
+				P.Point2D = FVector2D(
+					(*P2DArr)[0]->AsNumber(),
+					(*P2DArr)[1]->AsNumber()
+				);
+			}
+
+			PairObj->TryGetBoolField(TEXT("has_2d"), P.bHas2D);
+
+			// 如果 Actor 找不到但有点坐标，尝试创建一个 Marker
+			if (!P.SourceActor.IsValid() && !P.Point3D.IsZero())
+			{
+				UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+				if (World)
+				{
+					AActor* NewMarker = SpawnMarkerActor(World, P.Point3D, FString::Printf(TEXT("PnPMarker_%d"), P.Id));
+					if (NewMarker)
+					{
+						P.SourceActor = NewMarker;
+						ApplyColorToActor(NewMarker, P.Color);
+						LogMessage(FString::Printf(TEXT("[提示] 在 (%.1f, %.1f, %.1f) 重新创建了 Marker"), P.Point3D.X, P.Point3D.Y, P.Point3D.Z));
+					}
+				}
+			}
+
+			MaxId = FMath::Max(MaxId, P.Id);
+			m_Pairs.Add(P);
+		}
+		m_NextPairId = MaxId + 1;
+	}
+
+	// --- 重建 UI ---
+	RebuildPairsList();
+	RebuildRTMarkers();
+
+	// 如果加载了求解结果，更新预览
+	if (m_bLastSolveSuccess)
+	{
+		ApplySolvedPoseToPreview();
+		m_bPendingOverlayUpdate = true; // 延迟到下一个 Tick 刷新叠加层布局（此时 Slate 布局已完成）
+	}
+
+	LogMessage(FString::Printf(TEXT("[会话] 已加载 %d 个配对"), m_Pairs.Num()));
+	return true;
+}
+
+FReply SPnPToolWidget::OnSaveSessionClicked()
+{
+	// 打开保存文件对话框
+	IDesktopPlatform* Desktop = FDesktopPlatformModule::Get();
+	if (!Desktop) return FReply::Handled();
+
+	TArray<FString> OutFiles;
+	const bool bResult = Desktop->SaveFileDialog(
+		FSlateApplication::Get().FindBestParentWindowHandleForDialogs(nullptr),
+		TEXT("保存 PnP 会话"),
+		FPaths::ProjectSavedDir(),
+		TEXT("PnPSession"),
+		TEXT("PnP 会话文件 (*.pnp)|*.pnp"),
+		EFileDialogFlags::None,
+		OutFiles
+	);
+
+	if (!bResult || OutFiles.Num() == 0)
+		return FReply::Handled();
+
+	const FString FilePath = OutFiles[0];
+	FString JsonStr = SerializeToJson();
+
+	if (FFileHelper::SaveStringToFile(JsonStr, *FilePath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
+	{
+		LogMessage(FString::Printf(TEXT("[会话] 已保存到: %s"), *FilePath));
+	}
+	else
+	{
+		LogMessage(FString::Printf(TEXT("[错误] 保存失败: %s"), *FilePath));
+	}
+
+	return FReply::Handled();
+}
+
+FReply SPnPToolWidget::OnLoadSessionClicked()
+{
+	// 打开文件对话框
+	IDesktopPlatform* Desktop = FDesktopPlatformModule::Get();
+	if (!Desktop) return FReply::Handled();
+
+	TArray<FString> OutFiles;
+	const bool bResult = Desktop->OpenFileDialog(
+		FSlateApplication::Get().FindBestParentWindowHandleForDialogs(nullptr),
+		TEXT("加载 PnP 会话"),
+		FPaths::ProjectSavedDir(),
+		TEXT(""),
+		TEXT("PnP 会话文件 (*.pnp)|*.pnp"),
+		EFileDialogFlags::None,
+		OutFiles
+	);
+
+	if (!bResult || OutFiles.Num() == 0)
+		return FReply::Handled();
+
+	const FString FilePath = OutFiles[0];
+	FString JsonStr;
+	if (!FFileHelper::LoadFileToString(JsonStr, *FilePath))
+	{
+		LogMessage(FString::Printf(TEXT("[错误] 读取文件失败: %s"), *FilePath));
+		return FReply::Handled();
+	}
+
+	DeserializeFromJson(JsonStr);
+	LogMessage(FString::Printf(TEXT("[会话] 已从 %s 加载"), *FilePath));
+	return FReply::Handled();
 }
 
 #undef LOCTEXT_NAMESPACE

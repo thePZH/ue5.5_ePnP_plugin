@@ -230,8 +230,6 @@ private:
 	// 求解结果
 	FTransform m_SolvedPose;
 	double m_ReprojectionError = -1.0;
-	double m_TranslationError = -1.0;
-	double m_RotationError = -1.0;
 	bool m_bLastSolveSuccess = false;
 	bool m_bAutoSolve = false;   // 自动求解（委托触发，不在 Tick 中轮询）
 	bool m_bPendingOverlayUpdate = false; // 延迟刷新叠加层布局（加载会话时使用）

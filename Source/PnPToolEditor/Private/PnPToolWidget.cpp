@@ -122,8 +122,8 @@ void SPnPToolWidget::Construct(const FArguments& InArgs)
 							const FVector L = m_SolvedPose.GetLocation();
 							const FRotator R = m_SolvedPose.Rotator();
 							return FText::FromString(FString::Printf(
-								TEXT("求解成功\n\n位置: (%.2f, %.2f, %.2f) cm\n旋转: P=%.2f Y=%.2f R=%.2f deg\n\n重投影误差: %.6f px"),
-								L.X, L.Y, L.Z, R.Pitch, R.Yaw, R.Roll, m_ReprojectionError));
+								TEXT("求解成功\n\n位置: (%.2f, %.2f, %.2f) cm\n旋转: (%.2f, %.2f, %.2f) deg\n\n重投影误差: %.6f px"),
+								L.X, L.Y, L.Z, R.Roll, R.Pitch, R.Yaw, m_ReprojectionError));
 						})
 						.IsReadOnly(true)
 						.AutoWrapText(true)
@@ -201,7 +201,7 @@ TSharedRef<SWidget> SPnPToolWidget::BuildScenePreviewPanel()
 			+ SVerticalBox::Slot().AutoHeight()
 			[
 				SNew(STextBlock)
-				.Text(LOCTEXT("SceneHeader", "场景预览（求解后自动应用外参 + 半透明叠加目标纹理，肉眼对比对齐）"))
+				.Text(LOCTEXT("SceneHeader", "场景预览"))
 				.Font(FCoreStyle::GetDefaultFontStyle("Bold", 11))
 			]
 			+ SVerticalBox::Slot().AutoHeight().Padding(0, 2, 0, 2)
@@ -1821,8 +1821,6 @@ void SPnPToolWidget::DoSolve()
 	Solver->m_ImagePoints = ImgPts;
 	// 无 SceneCapture 来源，无 Ground Truth
 	Solver->m_GroundTruthPose = FTransform::Identity;
-	m_TranslationError = -1.0;
-	m_RotationError = -1.0;
 
 	Solver->SolvePnP();
 
@@ -1965,13 +1963,11 @@ FString SPnPToolWidget::SerializeToJson() const
 			MakeShareable(new FJsonValueNumber(L.Z))
 		});
 		Extrinsics->SetArrayField(TEXT("rotation"), {
+			MakeShareable(new FJsonValueNumber(R.Roll)),
 			MakeShareable(new FJsonValueNumber(R.Pitch)),
-			MakeShareable(new FJsonValueNumber(R.Yaw)),
-			MakeShareable(new FJsonValueNumber(R.Roll))
+			MakeShareable(new FJsonValueNumber(R.Yaw))
 		});
 		Extrinsics->SetNumberField(TEXT("reprojection_error"), m_ReprojectionError);
-		Extrinsics->SetNumberField(TEXT("translation_error"), m_TranslationError);
-		Extrinsics->SetNumberField(TEXT("rotation_error"), m_RotationError);
 	}
 	Root->SetObjectField(TEXT("extrinsics"), Extrinsics);
 
@@ -2003,11 +1999,14 @@ FString SPnPToolWidget::SerializeToJson() const
 		});
 		// Actor 路径
 		FString ActorPath;
+		FString ActorLabel;
 		if (AActor* A = P.SourceActor.Get())
 		{
 			ActorPath = A->GetPathName();
+			ActorLabel = A->GetActorLabel();
 		}
 		PairObj->SetStringField(TEXT("actor_path"), ActorPath);
+		PairObj->SetStringField(TEXT("actor_label"), ActorLabel);
 		// 3D 点
 		PairObj->SetArrayField(TEXT("point3d"), {
 			MakeShareable(new FJsonValueNumber(P.Point3D.X)),
@@ -2050,10 +2049,9 @@ bool SPnPToolWidget::DeserializeFromJson(const FString& JsonStr)
 		return false;
 	}
 
-	// --- 清除当前状态（包括销毁旧 Maker） ---
-	DestroyAllMarkers();
-	m_Pairs.Empty();
-	m_NextPairId = 0;
+	// --- 不清除现有 Marker，只重置 UI 状态 ---
+	// 注意：不调 DestroyAllMarkers() 和 m_Pairs.Empty()，保留已有的 Marker 和配对数据
+	// 这样加载多个存档时，之前存档的 Marker 不会消失，新的 Marker 会追加进来
 	m_ActivePairIndex = INDEX_NONE;
 	m_InputMode = EInputMode::Idle;
 	m_bLastSolveSuccess = false;
@@ -2087,13 +2085,11 @@ bool SPnPToolWidget::DeserializeFromJson(const FString& JsonStr)
 			if (LocArr.Num() == 3 && RotArr.Num() == 3)
 			{
 				FVector Loc(LocArr[0]->AsNumber(), LocArr[1]->AsNumber(), LocArr[2]->AsNumber());
-				FRotator Rot(RotArr[0]->AsNumber(), RotArr[1]->AsNumber(), RotArr[2]->AsNumber());
+				FRotator Rot(RotArr[1]->AsNumber(), RotArr[2]->AsNumber(), RotArr[0]->AsNumber());
 				m_SolvedPose = FTransform(Rot, Loc);
 				m_bLastSolveSuccess = true;
 			}
 			Extrinsics->TryGetNumberField(TEXT("reprojection_error"), m_ReprojectionError);
-			Extrinsics->TryGetNumberField(TEXT("translation_error"), m_TranslationError);
-			Extrinsics->TryGetNumberField(TEXT("rotation_error"), m_RotationError);
 		}
 	}
 
@@ -2136,12 +2132,17 @@ bool SPnPToolWidget::DeserializeFromJson(const FString& JsonStr)
 	// --- 自动求解 ---
 	Root->TryGetBoolField(TEXT("auto_solve"), m_bAutoSolve);
 
-	// --- 配对列表 ---
+	// --- 配对列表（追加模式：已有 Marker 保留，只新增存档中不存在的配对） ---
 	const TArray<TSharedPtr<FJsonValue>>* PairsArray = nullptr;
 	if (Root->TryGetArrayField(TEXT("pairs"), PairsArray))
 	{
-		m_Pairs.Reserve(PairsArray->Num());
+		// 先计算已有配对的最大 ID
 		int32 MaxId = 0;
+		for (const FPair& Existing : m_Pairs)
+		{
+			MaxId = FMath::Max(MaxId, Existing.Id);
+		}
+
 		for (const TSharedPtr<FJsonValue>& Val : *PairsArray)
 		{
 			TSharedPtr<FJsonObject> PairObj = Val->AsObject();
@@ -2164,20 +2165,66 @@ bool SPnPToolWidget::DeserializeFromJson(const FString& JsonStr)
 
 			// Actor 路径
 			FString ActorPath;
+			FString ActorLabel;
 			PairObj->TryGetStringField(TEXT("actor_path"), ActorPath);
+			PairObj->TryGetStringField(TEXT("actor_label"), ActorLabel);
+
+			AActor* FoundActor = nullptr;
+
+			// 1) 优先通过完整路径查找（适用于同一编辑器会话）
 			if (!ActorPath.IsEmpty())
 			{
-				// 尝试在关卡中查找 Actor
-				AActor* FoundActor = FindObject<AActor>(nullptr, *ActorPath);
-				if (FoundActor)
+				FoundActor = FindObject<AActor>(nullptr, *ActorPath);
+			}
+
+			// 2) 路径查找失败，通过标签名查找（跨会话/窗口关闭后路径会变）
+			if (!FoundActor && !ActorLabel.IsEmpty())
+			{
+				UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+				if (World)
 				{
-					P.SourceActor = FoundActor;
-					ApplyColorToActor(FoundActor, P.Color);
+					// 使用 TActorIterator<APnPMarkerActor> 遍历世界中所有 PnP Marker，按标签匹配
+					// 比 TObjectIterator<AActor> 更精确，且能正确找到编辑器世界中的 Actor
+					for (TActorIterator<APnPMarkerActor> It(World); It; ++It)
+					{
+						APnPMarkerActor* Marker = *It;
+						if (IsValid(Marker) && Marker->GetActorLabel() == ActorLabel)
+						{
+							FoundActor = Marker;
+							break;
+						}
+					}
 				}
-				else
+			}
+
+			// 3) 标签查找也失败，尝试按 3D 坐标匹配（允许微小容差）
+			if (!FoundActor && !P.Point3D.IsZero())
+			{
+				UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+				if (World)
 				{
-					LogMessage(FString::Printf(TEXT("[提示] 未找到 Actor: %s（将被重新创建）"), *ActorPath));
+					const float Tolerance = 10.0f; // 10cm 容差
+					for (TActorIterator<APnPMarkerActor> It(World); It; ++It)
+					{
+						APnPMarkerActor* Marker = *It;
+						if (IsValid(Marker) && Marker->GetActorLocation().Equals(P.Point3D, Tolerance))
+						{
+							FoundActor = Marker;
+							LogMessage(FString::Printf(TEXT("[提示] 通过坐标匹配到 Marker: %s"), *Marker->GetActorLabel()));
+							break;
+						}
+					}
 				}
+			}
+
+			if (FoundActor)
+			{
+				P.SourceActor = FoundActor;
+				ApplyColorToActor(FoundActor, P.Color);
+			}
+			else if (!ActorPath.IsEmpty())
+			{
+				LogMessage(FString::Printf(TEXT("[提示] 未找到 Actor: %s（将被重新创建）"), *ActorPath));
 			}
 
 			// 3D 点
@@ -2209,7 +2256,9 @@ bool SPnPToolWidget::DeserializeFromJson(const FString& JsonStr)
 				UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
 				if (World)
 				{
-					AActor* NewMarker = SpawnMarkerActor(World, P.Point3D, FString::Printf(TEXT("PnPMarker_%d"), P.Id));
+					// 优先使用保存的标签名，为空时兜底用 PnPMarker_{id}
+					const FString Label = ActorLabel.IsEmpty() ? FString::Printf(TEXT("PnPMarker_%d"), P.Id) : ActorLabel;
+					AActor* NewMarker = SpawnMarkerActor(World, P.Point3D, Label);
 					if (NewMarker)
 					{
 						P.SourceActor = NewMarker;
@@ -2219,8 +2268,25 @@ bool SPnPToolWidget::DeserializeFromJson(const FString& JsonStr)
 				}
 			}
 
-			MaxId = FMath::Max(MaxId, P.Id);
-			m_Pairs.Add(P);
+			// 检查该 Marker 是否已存在于 m_Pairs 中（通过 SourceActor 判断）
+			bool bAlreadyExists = false;
+			if (P.SourceActor.IsValid())
+			{
+				for (const FPair& Existing : m_Pairs)
+				{
+					if (Existing.SourceActor.Get() == P.SourceActor.Get())
+					{
+						bAlreadyExists = true;
+						break;
+					}
+				}
+			}
+
+			if (!bAlreadyExists)
+			{
+				MaxId = FMath::Max(MaxId, P.Id);
+				m_Pairs.Add(P);
+			}
 		}
 		m_NextPairId = MaxId + 1;
 	}

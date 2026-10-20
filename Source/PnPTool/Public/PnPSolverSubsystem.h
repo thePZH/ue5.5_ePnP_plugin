@@ -91,9 +91,13 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "PnP|Output", meta = (DisplayName = "Last Solve Success"))
 	bool m_bLastSolveSuccess = false;
 
-	/** 重投影误差（像素，越小越好） */
+	/** 重投影误差（像素，越小越好，所有参与点的误差平方和） */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "PnP|Output", meta = (DisplayName = "Reprojection Error (px)"))
 	double m_ReprojectionError = -1.0;
+
+	/** 每个点的重投影误差（像素，=sqrt(dx^2+dy^2)），顺序与输入点对一致 */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "PnP|Output", meta = (DisplayName = "Per-Point Reprojection Errors (px)"))
+	TArray<double> m_PerPointReprojectionErrors;
 
 	/** 平移误差（cm） */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "PnP|Output", meta = (DisplayName = "Translation Error (cm)"))

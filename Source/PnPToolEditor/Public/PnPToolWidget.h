@@ -56,6 +56,8 @@ public:
 		FVector Point3D = FVector::ZeroVector;
 		FVector2D Point2D = FVector2D::ZeroVector; // 目标纹理像素坐标（视觉坐标系，Y=0 顶）
 		bool bHas2D = false;
+		bool bEnabled = true;                // 是否参与 PnP 求解
+		double PerPointError = -1.0;         // 最近一次求解时该点的重投影误差（像素）
 	};
 
 	SLATE_BEGIN_ARGS(SPnPToolWidget) {}
@@ -109,6 +111,8 @@ private:
 	FReply OnAdd3DPointClicked();            // 读取编辑器选中 Actor
 	FReply OnAddEmptyPairClicked();          // 新增空配对
 	FReply OnEdit2DClicked(int32 Index);     // 进入某 pair 的 2D 编辑
+	void   SelectActorInEditor(int32 Index);   // 在编辑器中选中某 pair 对应的 Actor
+	void   SetPairEnabled(int32 Id, bool bEnabled); // 设置某 pair 是否参与 PnP 求解
 	FReply OnDeletePairClicked(int32 Index);
 	FReply OnCancelEditClicked();
 	FReply OnClearAllClicked();
@@ -127,6 +131,18 @@ private:
 	// 叠加层不透明度
 	float  GetOverlayImageOpacity() const { return m_DebugOverlayOpacity; }
 	void   SetOverlayImageOpacity(float V);
+
+	// 叠加层显隐（勾选开关，与不透明度联动）
+	bool   GetOverlayImageVisible() const { return m_bOverlayVisible; }
+	void   SetOverlayImageVisible(bool bVisible);
+
+	// 3D 点显隐（左侧场景预览）
+	bool   Get3DPointsVisible() const { return m_b3DPointsVisible; }
+	void   Set3DPointsVisible(bool bVisible);
+
+	// 3D 点统一缩放
+	float  Get3DPointScale() const { return m_3DPointScale; }
+	void   Set3DPointScale(float V);
 
 	// 叠加层放大倍率（>1.0 时 SceneCapture 的 FOV 更宽，RT 可视范围更大，叠加纹理保持原始内参 FOV 只覆盖中心区域）
 	float  GetDebugRTFovScale() const { return m_DebugFOVScale; }
@@ -179,10 +195,13 @@ private:
 	TSharedPtr<SBox> m_DebugContainerBox;
 	TSharedPtr<SImage> m_DebugOverlayImage;
 	float m_DebugOverlayOpacity = 0.5f;  // 目标纹理叠加不透明度
+	bool m_bOverlayVisible = true;        // 目标纹理叠加显隐开关（与不透明度联动）
 	FSlateBrush m_DebugOverlayBrush;
 	TSharedPtr<SBox> m_DebugOverlayBox;
 	bool m_bDebugPoseLocked = false;
 	float m_DebugFOVScale = 1.2f;    // SceneCapture FOV 放大倍率（>1 RT 可视范围更大，叠加纹理保持原始内参 FOV 只覆盖中心区域）
+	bool m_b3DPointsVisible = false;    // 左侧场景预览中 3D Marker 点是否显示
+	float m_3DPointScale = 1.0f;        // 3D Marker 统一缩放倍率（不做 Min/Max 限制，由用户自由输入；与编辑器细节面板实时同步）
 
 
 	// 目标纹理 + 右侧视口
@@ -216,7 +235,7 @@ private:
 
 	// 日志
 	TArray<FString> m_Messages;
-	TSharedPtr<SMultiLineEditableText> m_MessagesTextWidget;
+	TSharedPtr<STextBlock> m_MessagesTextWidget;
 	TSharedPtr<SScrollBox> m_MessagesScrollBox;
 
 	// 内参（手动输入）

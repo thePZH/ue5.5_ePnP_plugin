@@ -182,6 +182,7 @@ void UPnPSolverSubsystem::ComputeReprojectionError()
 	if (!m_bLastSolveSuccess || m_ObjectPoints.Num() == 0)
 	{
 		m_ReprojectionError = -1.0;
+		m_PerPointReprojectionErrors.Reset();
 		return;
 	}
 
@@ -227,10 +228,15 @@ void UPnPSolverSubsystem::ComputeReprojectionError()
 	cv::projectPoints(ObjectPointsMat, Rvec, Tvec, CameraMatrix, cv::noArray(), ProjectedPointsMat);
 
 	double ReprojectionError = 0.0;
+	m_PerPointReprojectionErrors.Reset();
+	m_PerPointReprojectionErrors.Reserve(NumPoints);
 	for (int32 i = 0; i < NumPoints; ++i)
 	{
 		const FVector2f Diff = ProjectedPoints[i] - m_ImagePoints[i];
-		ReprojectionError += (Diff.X * Diff.X) + (Diff.Y * Diff.Y);
+		const double SqErr = (double)(Diff.X * Diff.X) + (double)(Diff.Y * Diff.Y);
+		ReprojectionError += SqErr;
+		// 每点误差用欧氏距离（像素单位）
+		m_PerPointReprojectionErrors.Add(FMath::Sqrt(SqErr));
 	}
 
 	m_ReprojectionError = ReprojectionError;
@@ -239,6 +245,7 @@ void UPnPSolverSubsystem::ComputeReprojectionError()
 		m_ReprojectionError, bUseCached ? TEXT("缓存rvec/tvec") : TEXT("位姿转换"));
 #else
 	m_ReprojectionError = -1.0;
+	m_PerPointReprojectionErrors.Reset();
 #endif
 }
 
